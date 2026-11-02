@@ -4,6 +4,8 @@ version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Peek rewritten in Rust: region screen recorder with audio"
+repository = "https://github.com/rotkonetworks/peek2"
+readme = "README.md"
 
 # Deliberately small: X11 is spoken directly (x11rb, pure Rust), everything
 # else is std plus tools already on the box (ffmpeg, pactl, notify-send).
