@@ -415,7 +415,7 @@ impl Config {
         );
         line("", "mic_source", quote(&self.mic_source));
         line("x264/VP9 quality, lower is better.", "video_quality", self.video_quality.to_string());
-        line("gifski quality, 1-100.", "gif_quality", self.gif_quality.to_string());
+        line("GIF quality, 1-100 (palette size and dithering).", "gif_quality", self.gif_quality.to_string());
         line("Seconds of countdown before recording.", "start_delay", self.start_delay.to_string());
         line("Empty: ~/Videos/Peek2", "save_folder", quote(&self.save_folder));
         line("strftime pattern, as date(1) understands it.", "filename_format", quote(&self.filename_format));

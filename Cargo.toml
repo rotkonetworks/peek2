@@ -1,25 +1,17 @@
 [package]
 name = "peek2"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
-license = "GPL-3.0-or-later"
+license = "MIT"
 description = "Peek rewritten in Rust: region screen recorder with audio"
 repository = "https://github.com/rotkonetworks/peek2"
 readme = "README.md"
 
 # Deliberately small: X11 is spoken directly (x11rb, pure Rust), everything
 # else is std plus tools already on the box (ffmpeg, pactl, notify-send).
-# gifski is pure Rust too and links statically: no runtime libraries.
 [dependencies]
 anyhow = "1.0.104"
-gifski = { version = "1.34", default-features = false, features = ["gifsicle"] }
-imgref = "1.12.3"
-rgb = "0.8.53"
 x11rb = { version = "0.13", features = ["randr"] }
-
-# gifski is unusably slow unoptimized.
-[profile.dev.package."*"]
-opt-level = 3
 
 [profile.release]
 lto = "thin"

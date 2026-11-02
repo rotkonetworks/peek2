@@ -119,7 +119,7 @@ greys out, which shows a wrong or dead device right away.
 |---|---|---|
 | WebM (default) | VP9 | Opus |
 | MP4 | H.264, on the GPU via VAAPI when available | AAC |
-| GIF | gifski (built in) | — |
+| GIF | ffmpeg, two-pass palette | — |
 | APNG | ffmpeg | — |
 
 Audio modes are desktop audio (the monitor of whichever output is actually
@@ -172,4 +172,4 @@ install -Dm644 data/net.rotko.Peek2.desktop ~/.local/share/applications/net.rotk
 
 Set `PEEK2_DEBUG=1` to print ffmpeg command lines and size-fitting decisions.
 
-License: GPL-3.0-or-later (like Peek).
+License: MIT.
