@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=Peek2
+GenericName=Screen Recorder
+Comment=Record a screen region to WebM, MP4 or GIF, with audio
+Exec=peek2
+Icon=media-record
+Terminal=false
+Categories=AudioVideo;Video;Recorder;
+Keywords=screencast;recorder;gif;webm;mp4;clip;
+StartupNotify=false
+Actions=Window;Stop;
+
+[Desktop Action Window]
+Name=Peek-style recording window
+Exec=peek2 --window
+
+[Desktop Action Stop]
+Name=Stop recording
+Exec=peek2 --stop
