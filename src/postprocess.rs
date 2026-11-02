@@ -1,9 +1,11 @@
 //! Turns the raw recording into the final file. Video formats are written
-//! directly by the recorder; GIF goes through the gifski library and APNG
-//! through ffmpeg.
+//! directly by the recorder (and re-encoded only to fit a size limit); GIF
+//! goes through the gifski library and APNG through ffmpeg.
+//! Blocking: runs on a worker thread.
 
-use crate::config::{Config, Format};
-use crate::recorder::{self, temp_path};
+use crate::config::{Config, FitStrategy, Format};
+use crate::fit::{self, Shape};
+use crate::proc;
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -27,59 +29,62 @@ impl Job {
     }
 }
 
-pub async fn run(input: PathBuf, cfg: &Config, job: &Job) -> Result<PathBuf> {
+fn target(cfg: &Config) -> u64 {
+    cfg.fit_size_mb as u64 * 1_000_000
+}
+
+pub fn run(input: PathBuf, cfg: &Config, job: &Job) -> Result<PathBuf> {
+    let fps = cfg.framerate.clamp(1, 50) as f64;
     let result = match cfg.format {
-        Format::Mp4 | Format::Webm => return Ok(input),
-        Format::Gif => gifski(&input, cfg, job).await,
-        Format::Apng => apng(&input, cfg, job).await,
+        Format::Mp4 | Format::Webm => {
+            let limit = target(cfg);
+            if limit == 0 || std::fs::metadata(&input).map(|m| m.len()).unwrap_or(0) <= limit {
+                return Ok(input);
+            }
+            fit::fit_video(&input, cfg.format, limit, cfg.fit_strategy, &job.cancelled)
+        }
+        Format::Gif => gif(&input, Some(fps), cfg.gif_quality, target(cfg), cfg.fit_strategy, job),
+        Format::Apng => apng(&input, Some(fps), target(cfg), cfg.fit_strategy, job),
     };
     let _ = std::fs::remove_file(&input);
+    if job.is_cancelled() {
+        if let Ok(p) = &result {
+            let _ = std::fs::remove_file(p);
+        }
+        bail!("cancelled");
+    }
     result
 }
 
-async fn apng(input: &Path, cfg: &Config, job: &Job) -> Result<PathBuf> {
-    let output = temp_path("apng")?;
-    let args: Vec<std::ffi::OsString> = vec![
-        "ffmpeg".into(),
-        "-hide_banner".into(),
-        "-loglevel".into(),
-        "error".into(),
-        "-y".into(),
-        "-i".into(),
-        input.into(),
-        "-vf".into(),
-        format!("fps={}", cfg.framerate.clamp(1, 50)).into(),
-        "-plays".into(),
-        "0".into(),
-        "-f".into(),
-        "apng".into(),
-        output.clone().into(),
-    ];
-    let (proc, log) = recorder::spawn(&args, false)?;
-    let watcher = {
-        let job = job.clone();
-        let proc = proc.clone();
-        gtk::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
-            if job.is_cancelled() {
-                proc.force_exit();
-                return gtk::glib::ControlFlow::Break;
-            }
-            gtk::glib::ControlFlow::Continue
-        })
-    };
-    let res = recorder::wait(&proc, &log).await;
-    if !job.is_cancelled() {
-        watcher.remove();
+fn first_shape(info: &fit::Info, fps: Option<f64>) -> Shape {
+    let mut s = Shape::of(info);
+    if let Some(f) = fps {
+        s.fps = f.min(info.fps.max(1.0));
     }
-    if let Err(e) = res {
-        let _ = std::fs::remove_file(&output);
-        return Err(e.context("APNG conversion failed"));
-    }
-    if job.is_cancelled() {
-        let _ = std::fs::remove_file(&output);
-        bail!("cancelled");
-    }
-    Ok(output)
+    s
+}
+
+/// `input` to GIF at `fps` (None: the source's), under `target` bytes if non-zero.
+pub fn gif(input: &Path, fps: Option<f64>, quality: u8, target: u64, strategy: FitStrategy, job: &Job) -> Result<PathBuf> {
+    let info = fit::probe(input)?;
+    let first = first_shape(&info, fps);
+    fit::fit_animation(&info, first, quality.clamp(1, 100), target, strategy, "gif", |shape, q, out| {
+        encode_gif(input, out, shape, q, job)
+    })
+}
+
+pub fn apng(input: &Path, fps: Option<f64>, target: u64, strategy: FitStrategy, job: &Job) -> Result<PathBuf> {
+    let info = fit::probe(input)?;
+    let first = first_shape(&info, fps);
+    fit::fit_animation(&info, first, 100, target, strategy, "apng", |shape, _, out| {
+        let mut args = proc::ffmpeg(&["-i"]);
+        args.push(input.into());
+        for a in ["-vf", &shape.filter(&info), "-plays", "0", "-f", "apng"] {
+            args.push(a.into());
+        }
+        args.push(out.into());
+        proc::run(&args, Some(&job.cancelled)).context("APNG conversion failed")
+    })
 }
 
 struct Progress(Job);
@@ -90,96 +95,60 @@ impl gifski::progress::ProgressReporter for Progress {
     }
 }
 
-/// Decode the intermediate with ffmpeg into raw RGBA frames and feed them to
-/// gifski on worker threads, so the GTK main loop stays responsive.
-async fn gifski(input: &Path, cfg: &Config, job: &Job) -> Result<PathBuf> {
-    let output = temp_path("gif")?;
-    let (w, h) = probe_size(input)?;
-    let fps = cfg.framerate.clamp(1, 50);
-    let quality = cfg.gif_quality.clamp(1, 100);
-    let (tx, rx) = async_channel::bounded::<Result<()>>(1);
+/// Decode with ffmpeg into raw RGBA frames of the target shape and feed
+/// them to gifski, which encodes on its own writer thread.
+fn encode_gif(input: &Path, output: &Path, shape: Shape, quality: u8, job: &Job) -> Result<()> {
+    let (w, h) = (shape.width as usize, shape.height as usize);
+    // Explicit size: left unset, gifski quietly shrinks anything above
+    // ~800×600; resizing is the fit strategy's (and `downsample`'s) call.
+    let (collector, writer) = gifski::new(gifski::Settings {
+        width: Some(shape.width),
+        height: Some(shape.height),
+        quality,
+        fast: false,
+        repeat: gifski::Repeat::Infinite,
+    })?;
 
-    let input = input.to_path_buf();
-    let out = output.clone();
+    let file = std::fs::File::create(output)?;
     let job2 = job.clone();
-    std::thread::spawn(move || {
-        let res = (|| -> Result<()> {
-            let (collector, writer) = gifski::new(gifski::Settings {
-                width: None,
-                height: None,
-                quality,
-                fast: false,
-                repeat: gifski::Repeat::Infinite,
-            })?;
+    let writer_thread = std::thread::spawn(move || writer.write(file, &mut Progress(job2)));
 
-            let file = std::fs::File::create(&out)?;
-            let job3 = job2.clone();
-            let writer_thread = std::thread::spawn(move || writer.write(file, &mut Progress(job3)));
-
-            let mut child = Command::new("ffmpeg")
-                .args(["-hide_banner", "-loglevel", "error", "-i"])
-                .arg(&input)
-                .args(["-vf", &format!("fps={fps}"), "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .context("failed to run ffmpeg")?;
-            let mut stdout = child.stdout.take().unwrap();
-            let mut buf = vec![0u8; w * h * 4];
-            let mut index = 0usize;
-            let decode = (|| -> Result<()> {
-                loop {
-                    if job2.is_cancelled() {
-                        bail!("cancelled");
-                    }
-                    match stdout.read_exact(&mut buf) {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
-                        Err(e) => return Err(e.into()),
-                    }
-                    let pixels: Vec<rgb::RGBA8> = buf
-                        .chunks_exact(4)
-                        .map(|p| rgb::RGBA8::new(p[0], p[1], p[2], p[3]))
-                        .collect();
-                    let img = imgref::ImgVec::new(pixels, w, h);
-                    collector.add_frame_rgba(index, img, index as f64 / fps as f64)?;
-                    index += 1;
-                }
-            })();
-            let _ = child.kill();
-            let _ = child.wait();
-            drop(collector);
-            let written = writer_thread.join().map_err(|_| anyhow!("gifski panicked"))?;
-            decode?;
-            if index == 0 {
-                bail!("no frames were recorded");
-            }
-            written.map_err(|e| anyhow!("gifski: {e}"))
-        })();
-        let _ = tx.send_blocking(res);
-    });
-
-    let res = rx.recv().await.unwrap_or_else(|_| Err(anyhow!("gifski worker died")));
-    if res.is_err() || job.is_cancelled() {
-        let _ = std::fs::remove_file(&output);
-    }
-    res?;
-    if job.is_cancelled() {
-        bail!("cancelled");
-    }
-    Ok(output)
-}
-
-fn probe_size(input: &Path) -> Result<(usize, usize)> {
-    let out = Command::new("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"])
+    // Always resample to a fixed rate so frame timestamps are exact.
+    let filter = format!("fps={:.3},scale={w}:{h}:flags=lanczos", shape.fps);
+    let mut child = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
         .arg(input)
-        .output()
-        .context("failed to run ffprobe")?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    let mut it = s.trim().split(',').map(|v| v.trim().parse::<usize>());
-    match (it.next(), it.next()) {
-        (Some(Ok(w)), Some(Ok(h))) if w > 0 && h > 0 => Ok((w, h)),
-        _ => bail!("could not determine recording size"),
+        .args(["-vf", &filter, "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to run ffmpeg")?;
+    let mut stdout = child.stdout.take().context("no ffmpeg stdout")?;
+    let mut buf = vec![0u8; w * h * 4];
+    let mut index = 0usize;
+    let decode = (|| -> Result<()> {
+        loop {
+            if job.is_cancelled() {
+                bail!("cancelled");
+            }
+            match stdout.read_exact(&mut buf) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
+            let pixels: Vec<rgb::RGBA8> = buf.as_chunks::<4>().0.iter().map(|p| rgb::RGBA8::new(p[0], p[1], p[2], p[3])).collect();
+            collector.add_frame_rgba(index, imgref::ImgVec::new(pixels, w, h), index as f64 / shape.fps)?;
+            index += 1;
+        }
+    })();
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(collector);
+    let written = writer_thread.join().map_err(|_| anyhow!("gifski panicked"))?;
+    decode?;
+    if index == 0 {
+        bail!("no frames were recorded");
     }
+    written.map_err(|e| anyhow!("gifski: {e}"))
 }

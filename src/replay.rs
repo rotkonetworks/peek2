@@ -7,10 +7,9 @@
 use crate::audio;
 use crate::config::Config;
 use crate::meter;
-use crate::recorder::{self, Area};
-use crate::x11;
-use anyhow::{bail, Context, Result};
-use gtk::{gdk, gio, glib, prelude::*};
+use crate::proc::{self, Proc, Stderr};
+use crate::recorder::Area;
+use anyhow::{bail, Result};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -18,33 +17,13 @@ use std::time::SystemTime;
 const SEGMENT: u32 = 2;
 
 pub struct Replay {
-    proc: gio::Subprocess,
-    log: PathBuf,
+    proc: Proc,
     dir: PathBuf,
     seconds: u32,
 }
 
 fn dir() -> PathBuf {
-    glib::user_runtime_dir().join("peek2").join("replay")
-}
-
-/// The monitor under the pointer, in root pixels.
-pub fn current_monitor() -> Option<Area> {
-    let display = gdk::Display::default()?;
-    let monitors = display.monitors();
-    let pointer = x11::get().and_then(|x| x.pointer());
-    let rects: Vec<Area> = (0..monitors.n_items())
-        .filter_map(|i| monitors.item(i).and_downcast::<gdk::Monitor>())
-        .map(|m| {
-            let (g, s) = (m.geometry(), m.scale_factor().max(1));
-            Area { x: g.x() * s, y: g.y() * s, width: g.width() * s, height: g.height() * s }
-        })
-        .collect();
-    rects
-        .iter()
-        .find(|r| pointer.is_some_and(|(px, py)| px >= r.x && py >= r.y && px < r.x + r.width && py < r.y + r.height))
-        .or(rects.first())
-        .copied()
+    crate::util::runtime_dir().join("peek2").join("replay")
 }
 
 fn args(area: Area, cfg: &Config, sources: &[String], dir: &Path) -> Vec<OsString> {
@@ -103,11 +82,11 @@ fn args(area: Area, cfg: &Config, sources: &[String], dir: &Path) -> Vec<OsStrin
 }
 
 impl Replay {
-    pub fn start(cfg: &Config) -> Result<Replay> {
-        let area = current_monitor().context("no monitor found")?;
+    /// `on_exit` gets ffmpeg's error if the buffer dies on its own.
+    pub fn start(cfg: &Config, area: Area, on_exit: impl FnOnce(String) + 'static) -> Result<Replay> {
         let dir = dir();
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).context("creating replay buffer dir")?;
+        std::fs::create_dir_all(&dir)?;
         // Desktop/mic per the audio setting, whatever the clip format is.
         let mut audio_cfg = cfg.clone();
         audio_cfg.format = crate::config::Format::Mp4;
@@ -116,66 +95,52 @@ impl Replay {
         if std::env::var_os("PEEK2_DEBUG").is_some() {
             eprintln!("peek2: replay: {}", args.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "));
         }
-        let (proc, log) = recorder::spawn(&args, false)?;
-        Ok(Replay { proc, log, dir, seconds: cfg.replay_seconds.max(SEGMENT) })
+        let proc = Proc::spawn(&args, false, Stderr::Log, move |res| on_exit(res.err().map(|e| format!("{e:#}")).unwrap_or_default()))?;
+        Ok(Replay { proc, dir, seconds: cfg.replay_seconds.max(SEGMENT) })
     }
 
-    /// End the buffer and drop its segments.
-    pub fn stop(&self) {
-        self.proc.force_exit();
-        let _ = std::fs::remove_file(&self.log);
-        let _ = std::fs::remove_dir_all(&self.dir);
+    /// Blocking: join the newest segments covering the buffer length into an MP4.
+    pub fn save_job(&self) -> impl FnOnce() -> Result<PathBuf> + Send + 'static {
+        let (dir, seconds) = (self.dir.clone(), self.seconds);
+        move || save(&dir, seconds)
     }
+}
 
-    /// Resolves with ffmpeg's error output if the buffer dies.
-    pub async fn exited(&self) -> String {
-        let _ = self.proc.wait_future().await;
-        let msg = std::fs::read_to_string(&self.log).unwrap_or_default();
-        msg.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+fn save(dir: &Path, seconds: u32) -> Result<PathBuf> {
+    let mut segs: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "ts"))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .filter(|(_, p)| std::fs::metadata(p).is_ok_and(|m| m.len() > 0))
+        .collect();
+    if segs.is_empty() {
+        bail!("the replay buffer is still empty");
     }
-
-    /// Join the newest segments covering the buffer length into an MP4.
-    pub async fn save(&self) -> Result<PathBuf> {
-        let mut segs: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(&self.dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "ts"))
-            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-            .filter(|(_, p)| std::fs::metadata(p).is_ok_and(|m| m.len() > 0))
-            .collect();
-        if segs.is_empty() {
-            bail!("the replay buffer is still empty");
-        }
-        segs.sort();
-        // The newest segment is still being written; MPEG-TS reads fine cut off.
-        let keep = (self.seconds.div_ceil(SEGMENT) + 1) as usize;
-        let segs = &segs[segs.len().saturating_sub(keep)..];
-        let list = recorder::temp_path("txt")?;
-        let body: String =
-            segs.iter().map(|(_, p)| format!("file '{}'\n", p.to_string_lossy().replace('\'', "'\\''"))).collect();
-        std::fs::write(&list, body)?;
-        let out = recorder::temp_path("mp4")?;
-        let mut a: Vec<OsString> =
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i"].map(OsString::from).to_vec();
-        a.push(list.clone().into());
-        for x in ["-map", "0", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart"] {
-            a.push(x.into());
-        }
-        a.push(out.clone().into());
-        let (proc, log) = recorder::spawn(&a, false)?;
-        let res = recorder::wait(&proc, &log).await;
-        let _ = std::fs::remove_file(&list);
-        if let Err(e) = res {
-            let _ = std::fs::remove_file(&out);
-            return Err(e.context("saving the replay failed"));
-        }
-        Ok(out)
+    segs.sort();
+    // The newest segment is still being written; MPEG-TS reads fine cut off.
+    let keep = (seconds.div_ceil(SEGMENT) + 1) as usize;
+    let segs: Vec<PathBuf> = segs[segs.len().saturating_sub(keep)..].iter().map(|(_, p)| p.clone()).collect();
+    let list = proc::temp_path("txt")?;
+    std::fs::write(&list, proc::concat_list(&segs))?;
+    let out = proc::temp_path("mp4")?;
+    let mut a = proc::ffmpeg(&["-f", "concat", "-safe", "0", "-i"]);
+    a.push(list.clone().into());
+    for x in ["-map", "0", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart"] {
+        a.push(x.into());
     }
+    a.push(out.clone().into());
+    let res = proc::run(&a, None);
+    let _ = std::fs::remove_file(&list);
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&out);
+        return Err(e.context("saving the replay failed"));
+    }
+    Ok(out)
 }
 
 impl Drop for Replay {
     fn drop(&mut self) {
-        self.proc.force_exit();
-        let _ = std::fs::remove_file(&self.log);
+        self.proc.kill();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }

@@ -1,57 +1,62 @@
 //! Audio device discovery through `pactl`, which works on both PulseAudio and
 //! PipeWire (pipewire-pulse). ffmpeg records from these sources via `-f pulse`.
+//! pactl runs with LC_ALL=C so its text output is parseable.
 
 use crate::config::{AudioMode, Config};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-#[derive(Clone, Debug)]
-pub struct Source {
-    pub name: String,
-    pub description: String,
-    /// Set when this source is the monitor of an output (i.e. desktop audio).
-    pub is_monitor: bool,
-}
-
-pub fn list_sources() -> Vec<Source> {
-    let Ok(out) = Command::new("pactl").args(["-f", "json", "list", "sources"]).output() else {
-        return Vec::new();
-    };
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
-        return Vec::new();
-    };
-    v.as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| {
-                    let name = s.get("name")?.as_str()?.to_string();
-                    let description = s.get("description").and_then(|d| d.as_str()).unwrap_or(&name).to_string();
-                    let is_monitor = s
-                        .get("monitor_source")
-                        .and_then(|m| m.as_str())
-                        .is_some_and(|m| !m.is_empty())
-                        || name.ends_with(".monitor");
-                    Some(Source { name, description, is_monitor })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+fn pactl(args: &[&str]) -> Option<String> {
+    let out = Command::new("pactl").args(args).env("LC_ALL", "C").stderr(Stdio::null()).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn pactl_get(what: &str) -> Option<String> {
-    let out = Command::new("pactl").arg(what).output().ok()?;
-    let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    let s = pactl(&[what])?.trim().to_string();
     (!s.is_empty()).then_some(s)
 }
 
-fn pactl_json(what: &[&str]) -> Vec<serde_json::Value> {
-    Command::new("pactl")
-        .args(["-f", "json", "list"])
-        .args(what)
-        .output()
-        .ok()
-        .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
-        .and_then(|v| v.as_array().cloned())
+struct Sink {
+    index: u64,
+    name: String,
+    running: bool,
+}
+
+fn sinks() -> Vec<Sink> {
+    // index \t name \t driver \t sample spec \t state
+    pactl(&["list", "short", "sinks"])
         .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            Some(Sink { index: f.first()?.parse().ok()?, name: f.get(1)?.to_string(), running: f.get(4) == Some(&"RUNNING") })
+        })
+        .collect()
+}
+
+/// (sink index, corked) for each playback stream.
+fn sink_inputs() -> Vec<(u64, bool)> {
+    let text = pactl(&["list", "sink-inputs"]).unwrap_or_default();
+    let mut out = Vec::new();
+    let mut cur: Option<(Option<u64>, bool)> = None;
+    for line in text.lines() {
+        if line.starts_with("Sink Input #") {
+            if let Some((Some(s), c)) = cur.take() {
+                out.push((s, c));
+            }
+            cur = Some((None, false));
+        } else if let Some(c) = cur.as_mut() {
+            let l = line.trim();
+            if let Some(v) = l.strip_prefix("Sink:") {
+                c.0 = v.trim().parse().ok();
+            } else if let Some(v) = l.strip_prefix("Corked:") {
+                c.1 = v.trim() == "yes";
+            }
+        }
+    }
+    if let Some((Some(s), c)) = cur {
+        out.push((s, c));
+    }
+    out
 }
 
 /// Monitor of the output that is actually playing. The default sink is
@@ -59,23 +64,13 @@ fn pactl_json(what: &[&str]) -> Vec<serde_json::Value> {
 /// default while a headset plays), so prefer the sink with the most
 /// uncorked streams, then any running sink, then the default.
 fn active_monitor() -> String {
-    let sinks = pactl_json(&["sinks"]);
-    let inputs = pactl_json(&["sink-inputs"]);
+    let inputs = sink_inputs();
     let default = pactl_get("get-default-sink");
-    let name_of = |s: &serde_json::Value| s.get("name").and_then(|n| n.as_str()).map(str::to_string);
-
     let mut best: Option<(usize, bool, bool, String)> = None;
-    for sink in &sinks {
-        let Some(name) = name_of(sink) else { continue };
-        let index = sink.get("index").and_then(|i| i.as_u64());
-        let streams = inputs
-            .iter()
-            .filter(|i| i.get("sink").and_then(|s| s.as_u64()) == index)
-            .filter(|i| !i.get("corked").and_then(|c| c.as_bool()).unwrap_or(false))
-            .count();
-        let running = sink.get("state").and_then(|s| s.as_str()) == Some("RUNNING");
-        let is_default = default.as_deref() == Some(name.as_str());
-        let key = (streams, running, is_default, name);
+    for sink in sinks() {
+        let streams = inputs.iter().filter(|(s, corked)| *s == sink.index && !corked).count();
+        let is_default = default.as_deref() == Some(sink.name.as_str());
+        let key = (streams, sink.running, is_default, sink.name);
         if best.as_ref().is_none_or(|b| (key.0, key.1, key.2) > (b.0, b.1, b.2)) {
             best = Some(key);
         }
@@ -95,9 +90,7 @@ pub fn resolve(cfg: &Config) -> Vec<String> {
     if !cfg.format.has_audio() {
         return Vec::new();
     }
-    let desktop = || {
-        if cfg.desktop_source.is_empty() { active_monitor() } else { cfg.desktop_source.clone() }
-    };
+    let desktop = || if cfg.desktop_source.is_empty() { active_monitor() } else { cfg.desktop_source.clone() };
     let mic = || if cfg.mic_source.is_empty() { default_mic() } else { cfg.mic_source.clone() };
     match cfg.audio {
         AudioMode::Off => Vec::new(),

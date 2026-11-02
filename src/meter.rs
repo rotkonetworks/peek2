@@ -4,11 +4,8 @@
 //! logs the peaks via `ametadata` on stderr (unbuffered, unlike its avio
 //! outputs), so the meter shows exactly what is being recorded, live.
 
-use gtk::{gio, glib, prelude::*};
-use std::cell::RefCell;
-use std::collections::VecDeque;
+use crate::proc::{Proc, Stderr};
 use std::ffi::OsString;
-use std::rc::Rc;
 
 const METER_CHAIN: &str = "asetnsamples=n=4800:p=0,astats=metadata=1:reset=1:measure_perchannel=Peak_level:measure_overall=none,ametadata=mode=print";
 
@@ -66,52 +63,79 @@ pub fn audio_graph(first: usize, n: usize, record: bool, opts: AudioOpts) -> Str
     g.join(";")
 }
 
-pub type Sink = Rc<RefCell<Option<Box<dyn Fn(Vec<f32>)>>>>;
-
-/// Drain ffmpeg's stderr: meter lines go to `sink` as per-channel peak dBFS
-/// (-inf for silence) once per window; anything else is kept in `other`
-/// (bounded) for error reporting. Must run for the process' whole life so
-/// the pipe never fills.
-pub fn read_stderr(stream: gio::InputStream, sink: Sink, other: Rc<RefCell<VecDeque<String>>>) {
-    let data = gio::DataInputStream::new(&stream);
-    glib::spawn_future_local(async move {
-        let mut cur: Vec<f32> = Vec::new();
-        let flush = |cur: &mut Vec<f32>| {
-            if !cur.is_empty() {
-                let levels = std::mem::take(cur);
-                if let Some(f) = sink.borrow().as_ref() {
-                    f(levels);
-                }
+/// A stderr line handler that turns meter lines into per-channel peak dBFS
+/// (-inf for silence), reported once per measuring window.
+pub fn parser(sink: impl Fn(Vec<f32>) + 'static) -> Box<dyn FnMut(&str)> {
+    let mut cur: Vec<f32> = Vec::new();
+    Box::new(move |line: &str| {
+        if let Some(i) = line.find("lavfi.astats.") {
+            let rest = &line[i + "lavfi.astats.".len()..];
+            let Some((ch, val)) = rest.split_once(".Peak_level=") else { return };
+            let Ok(ch) = ch.parse::<usize>() else { return };
+            if ch == 0 {
+                return;
             }
-        };
-        while let Ok(Some(line)) = data.read_line_utf8_future(glib::Priority::DEFAULT).await {
-            if let Some(i) = line.find("lavfi.astats.") {
-                let rest = &line[i + "lavfi.astats.".len()..];
-                let Some((ch, val)) = rest.split_once(".Peak_level=") else { continue };
-                let Ok(ch) = ch.parse::<usize>() else { continue };
-                let v = val.trim().parse::<f32>().unwrap_or(f32::NEG_INFINITY);
-                if cur.len() < ch {
-                    cur.resize(ch, f32::NEG_INFINITY);
-                }
-                cur[ch - 1] = v;
-            } else if line.contains("] frame:") {
-                flush(&mut cur);
-            } else if !line.contains("Parsed_astats") {
-                let mut o = other.borrow_mut();
-                o.push_back(line.to_string());
-                if o.len() > 12 {
-                    o.pop_front();
-                }
+            let v = val.trim().parse::<f32>().unwrap_or(f32::NEG_INFINITY);
+            if cur.len() < ch {
+                cur.resize(ch, f32::NEG_INFINITY);
             }
+            cur[ch - 1] = v;
+        } else if line.contains("] frame:") && !cur.is_empty() {
+            sink(std::mem::take(&mut cur));
         }
-        flush(&mut cur);
-    });
+    })
 }
 
-/// Meter-only ffmpeg used before recording starts (e.g. in the selector),
-/// so the user can check the right source is live.
+/// Latest levels per source, plus how long each has been silent, ready to
+/// draw. A source silent for ~2 s is greyed out, so a wrong or dead device
+/// shows at a glance.
+#[derive(Default)]
+pub struct Levels {
+    names: &'static [&'static str],
+    values: Vec<f32>,
+    silent_for: Vec<u32>,
+}
+
+impl Levels {
+    pub fn configure(&mut self, cfg: &crate::config::Config) {
+        self.names = if cfg.format.has_audio() { cfg.audio.sources() } else { &[] };
+        self.reset();
+    }
+
+    pub fn reset(&mut self) {
+        self.values = vec![f32::NEG_INFINITY; self.names.len() * 2];
+        self.silent_for = vec![0; self.names.len()];
+    }
+
+    pub fn set(&mut self, levels: &[f32]) {
+        for i in 0..self.names.len() {
+            let l = levels.get(2 * i).copied().unwrap_or(f32::NEG_INFINITY);
+            let r = levels.get(2 * i + 1).copied().unwrap_or(l);
+            self.values[2 * i] = l;
+            self.values[2 * i + 1] = r;
+            self.silent_for[i] = if l.max(r) < -70.0 { self.silent_for[i].saturating_add(1) } else { 0 };
+        }
+    }
+
+    /// None without audio.
+    pub fn item(&self) -> Option<crate::draw::Item> {
+        if self.names.is_empty() {
+            return None;
+        }
+        Some(crate::draw::Item::Meters(
+            self.names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (*n, self.values[2 * i], self.values[2 * i + 1], self.silent_for[i] >= 20))
+                .collect(),
+        ))
+    }
+}
+
+/// Meter-only ffmpeg used before recording starts (in the selector), so the
+/// user can check the right source is live.
 pub struct Preview {
-    proc: gio::Subprocess,
+    proc: Proc,
 }
 
 impl Preview {
@@ -119,10 +143,8 @@ impl Preview {
         if sources.is_empty() {
             return None;
         }
-        let mut a: Vec<OsString> = ["ffmpeg", "-hide_banner", "-loglevel", "info", "-nostats", "-nostdin"]
-            .iter()
-            .map(OsString::from)
-            .collect();
+        let mut a: Vec<OsString> =
+            ["ffmpeg", "-hide_banner", "-loglevel", "info", "-nostats", "-nostdin"].iter().map(OsString::from).collect();
         for s in sources {
             for x in ["-f", "pulse", "-fragment_size", "4096", "-i", s] {
                 a.push(x.into());
@@ -133,21 +155,12 @@ impl Preview {
         for x in ["-map", "[meter]", "-f", "null", "/dev/null"] {
             a.push(x.into());
         }
-        let argv: Vec<&std::ffi::OsStr> = a.iter().map(|s| s.as_os_str()).collect();
-        let proc = gio::Subprocess::newv(
-            &argv,
-            gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_PIPE,
-        )
-        .map_err(|e| eprintln!("peek2: meter: {e}"))
-        .ok()?;
-        let sink: Sink = Rc::new(RefCell::new(Some(Box::new(f))));
-        read_stderr(proc.stderr_pipe()?, sink, Rc::default());
-        Some(Preview { proc })
+        Proc::spawn(&a, false, Stderr::Lines(parser(f)), |_| {}).map_err(|e| eprintln!("peek2: meter: {e:#}")).ok().map(|proc| Preview { proc })
     }
 }
 
 impl Drop for Preview {
     fn drop(&mut self) {
-        self.proc.force_exit();
+        self.proc.kill();
     }
 }

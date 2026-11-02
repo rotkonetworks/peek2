@@ -4,6 +4,9 @@ A Rust rewrite of [Peek](https://github.com/phw/peek) built for quick clips:
 pick an area, record WebM/MP4 **with audio** (or GIF/APNG), and the file lands
 in your clipboard ready to paste into chat.
 
+No GTK, no GLib: peek2 speaks X11 directly and links only against libc. It
+needs `ffmpeg` and `pactl` at runtime, nothing else.
+
 ## Usage
 
 Launch `peek2` (or press **Ctrl+Alt+R**). The monitor under the pointer darkens:
@@ -11,46 +14,49 @@ Launch `peek2` (or press **Ctrl+Alt+R**). The monitor under the pointer darkens:
 - **drag** to select a region, or **click** a window to record exactly it
 - drag the handles to adjust; arrows nudge (Shift ×10, Ctrl resizes)
 - **Space**: whole screen · **Enter** / double-click: record · **Esc**: cancel
-- pick format, audio source and mouse capture in the toolbar under the selection
+- the toolbar under the selection cycles format, audio source, mouse capture
+  and the size limit (right-click the size limit to change what gives way)
 
 While recording, a red border sits *outside* the captured area with a small
 stop bar (pause, stop, discard). A full-screen recording has no room outside,
 so the bar stays hidden; use the hotkey or the tray. Press **Ctrl+Alt+R**
 again (or Stop) to finish. The clip is saved to `~/Videos/Peek2` and copied to
 the clipboard as a file (paste it into Discord, Slack, a browser or a file
-manager), then opens in the review window.
+manager). A notification offers to open it or show it in its folder.
 
 Pausing ends the current part and resuming starts a new one; when the take
 ends, the parts are joined without re-encoding.
 
-## Review window
+## Fit to size
 
-After a WebM/MP4 is saved (it's already on disk and in the clipboard), it opens
-for checking:
+Set a size limit (toolbar, tray menu, or `fit_size_mb` in the settings) and
+clips that come out bigger are shrunk to fit: 10 MB for Discord, 25, 50, or
+any number. `fit_strategy` decides what gives way:
 
-- plays back with sound, looping inside the selection
-- drag the gold handles on the filmstrip to trim. The start snaps to keyframes
-  (recordings have one per second), because a trim is a lossless stream copy
-  and so takes no time
-- **Fit size** re-encodes the selection to land under 10 MB (Discord), 25 MB
-  or 50 MB. It scales the video down instead of going blocky when the bitrate
-  gets thin, and checks the result
-- **Discard** moves the file to the trash and clears the clipboard
+| strategy | what happens |
+|---|---|
+| `auto` (default) | cap at 30 fps, shrink down to half size, then drop frames (to 15 fps), then lower quality |
+| `scale` | keep framerate and quality, shrink the resolution |
+| `framerate` | drop frames first (down to 10 fps), then shrink |
+| `quality` | keep resolution and framerate, lower the bitrate only |
 
-Keys: space play · `i` / `o` set in and out at the playhead · ←/→ step 1 s ·
-`f` fit size · Enter save · Shift+Delete discard · Esc close. Turn it off in
-Preferences, or open any clip with `peek2 --review FILE`.
+Videos get a bitrate computed from the limit and the clip length, with the
+resolution and framerate picked so each pixel keeps enough bits to stay clean;
+the result is measured and re-encoded smaller if it's still over. GIF and APNG
+sizes can't be predicted, so they're encoded, measured and adjusted until they
+fit.
+
+Existing clips too: `peek2 --fit 10 clip.mp4` writes `clip (10 MB).mp4`.
 
 ## Replay buffer
 
-Like OBS: turn it on from the tray menu (or `peek2 --replay`, or *Start with
-peek2* in Preferences), and the monitor under the pointer is recorded
+Like OBS: turn it on from the tray menu (or `peek2 --replay`, or
+`replay_on_start = true`), and the monitor under the pointer is recorded
 continuously into 2-second chunks in RAM (`$XDG_RUNTIME_DIR`). **Ctrl+Alt+S**
 (or middle-click the tray icon, or `peek2 --save-replay`) saves the last 60 s
-(configurable) as an MP4, joined without re-encoding, into the clipboard and
-the review window. The tray icon shows a small red dot while it runs.
-
-`peek2 --window` opens the classic Peek see-through window instead.
+(configurable) as an MP4, joined without re-encoding (and fitted to the size
+limit, if set), into the clipboard. The tray icon shows a small red dot while
+it runs.
 
 peek2 stays resident after the first launch, which keeps the hotkey working.
 On X11, clipboard contents also disappear when the app that owns them exits.
@@ -59,14 +65,14 @@ On X11, clipboard contents also disappear when the app that owns them exits.
 | Command | |
 |---|---|
 | `peek2` / `--select` | region selector |
-| `--window` | Peek-style window |
 | `--toggle` | start/stop (for binding in sxhkd etc.) |
 | `--background` | start resident with the tray icon and hotkey (autostart, e.g. in bspwmrc) |
-| `--status-follow` | optional text status line for polybar (`tail = true`) |
 | `--pause` | pause / resume |
 | `--replay`, `--save-replay` | replay buffer on/off, save it |
-| `--review FILE` | open a clip in the review window |
-| `--stop`, `--cancel`, `--open-folder`, `--preferences`, `--quit` | |
+| `--fit MB FILE` | shrink an existing clip |
+| `--status-follow` | optional text status line for polybar (`tail = true`) |
+| `--preferences` | open the settings file |
+| `--stop`, `--cancel`, `--open-folder`, `--quit` | |
 
 ## Tray icon
 
@@ -82,12 +88,12 @@ Paused is an empty red ring; a running replay buffer adds a small red dot.
 |---|---|
 | left | select an area and record, or stop |
 | middle | save the replay buffer when it runs, else open the recordings folder |
-| right | menu: record / pause / stop, replay buffer, format, audio, recent clips, folder, preferences |
+| right | menu: record / pause / stop, replay buffer, format, audio, size limit, recent clips, folder, settings |
 
 ### Optional text module
 
 For a timer in the bar instead, `--status-follow` prints a polybar line on every
-state change. It's pushed through inotify, not polled:
+state change. It's pushed over the instance's socket, not polled:
 
 ```ini
 [module/peek2]
@@ -101,12 +107,11 @@ click-middle = ~/.local/bin/peek2 --open-folder &
 
 ## Audio meters
 
-While you select an area, the toolbar shows live peak meters: a speaker
-and/or mic icon, each with stacked **L/R** bars. The same meters run in the
-stop bar during recording. They come straight from the recording ffmpeg, so
-they show what actually goes into the file. A source that stays silent for
-~2 s fades out, which shows a wrong or dead device right away. Hover a meter
-for exact dBFS.
+While you select an area, the toolbar shows live peak meters per source
+(`spk`, `mic`), each with stacked **L/R** bars. The same meters run in the stop
+bar during recording. They come straight from the recording ffmpeg, so they
+show what actually goes into the file. A source that stays silent for ~2 s
+greys out, which shows a wrong or dead device right away.
 
 ## Formats
 
@@ -118,35 +123,44 @@ for exact dBFS.
 | APNG | ffmpeg | — |
 
 Audio modes are desktop audio (the monitor of whichever output is actually
-playing, not just the default one), microphone,
-or both mixed. Specific devices can be chosen in Preferences. The microphone
-gets adaptive noise suppression (ffmpeg `afftdn`, on by default). With both
-sources, *Separate desktop and mic tracks* also stores each source as its own
+playing, not just the default one), microphone, or both mixed. Specific
+devices can be set in the settings file (`pactl list short sources`). The
+microphone gets adaptive noise suppression (ffmpeg `afftdn`, on by default).
+With both sources, `separate_audio_tracks` also stores each source as its own
 named track after the mix, for editing later.
 
 **Hardware encoding:** at startup peek2 test-encodes a few frames with
 `h264_vaapi` and uses the GPU for MP4 and the replay buffer if that works
 (about 0.3 CPU-seconds per 10 s of 1440p, against about 22 with x264). VP9 stays
-on the CPU, because AMD GPUs have no VP9 encoder. This uses
-PulseAudio/PipeWire through `pactl` and ffmpeg's `pulse` input.
+on the CPU, because AMD GPUs have no VP9 encoder.
+
+## Settings
+
+`~/.config/peek2/config.toml`, documented inline; `peek2 --preferences` opens
+it. Changes apply to the next recording; hotkeys after a restart. The toolbar
+and tray menu write the common ones for you.
 
 ## Requirements
 
-- X11 session, or XWayland (peek2 always uses the X11 backend)
-- `ffmpeg` with x11grab, pulse, libvpx, libopus, libx264
-- `pactl`
-- a compositor (e.g. picom) for the translucent overlay and Peek window.
-  Without one, the selector falls back to a frozen screenshot.
+- X11 session, or XWayland
+- `ffmpeg` (with x11grab, pulse, libvpx, libopus, libx264) and `ffprobe`
+- `pactl` (PulseAudio or PipeWire)
+- optional: `notify-send` for notifications, `xdg-open` to open clips,
+  `zenity` or `kdialog` for `ask_save_location`
+- a compositor (e.g. picom) for the translucent overlay. Without one, the
+  selector shows a dimmed frozen screenshot instead.
+
+Text is drawn with the X server's built-in bitmap fonts (misc-fixed), so
+there are no font dependencies. On HiDPI screens the UI scales with `Xft.dpi`
+(or `PEEK2_SCALE=2`); `PEEK2_FONT` picks another core font.
 
 **Wayland:** Wayland gives apps no global coordinates or screen access, so
 under XWayland only X11 windows show up in recordings. Native Wayland capture
 would need the xdg-desktop-portal ScreenCast + PipeWire path that OBS uses,
-which isn't implemented yet. The recorder sits behind its own module so it can
-be added later.
+which isn't implemented yet.
 
-Tiling WMs: the selector and recording frame are override-redirect windows, so
-the WM leaves them alone. The Peek window marks itself as a dialog, so
-bspwm/i3 float it.
+Tiling WMs: the selector, stop bar and menu are override-redirect windows, so
+the WM leaves them alone.
 
 ## Build
 
@@ -156,7 +170,6 @@ install -Dm755 target/release/peek2 ~/.local/bin/peek2
 install -Dm644 data/net.rotko.Peek2.desktop ~/.local/share/applications/net.rotko.Peek2.desktop
 ```
 
-Config: `~/.config/peek2/config.toml`. Set `PEEK2_DEBUG=1` to print the ffmpeg
-command line.
+Set `PEEK2_DEBUG=1` to print ffmpeg command lines and size-fitting decisions.
 
 License: GPL-3.0-or-later (like Peek).
