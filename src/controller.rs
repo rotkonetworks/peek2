@@ -222,7 +222,8 @@ impl Controller {
                 }
             }
         };
-        let rec = match Recording::start(area, &self.config.borrow(), levels, on_exit) {
+        let started = Recording::start(area, &self.config.borrow(), levels, on_exit);
+        let rec = match started {
             Ok(r) => Rc::new(r),
             Err(e) => return self.fail(format!("{e:#}")),
         };
@@ -352,7 +353,7 @@ impl Controller {
         self.stop_timer();
         match self.phase.get() {
             Phase::Countdown(_) => self.set_phase(Phase::Idle),
-            Phase::Recording(_) | Phase::Paused(_) => match self.rec.borrow().as_ref() {
+            Phase::Recording(_) | Phase::Paused(_) => match self.rec.borrow().clone() {
                 Some(rec) => rec.kill(),
                 None => {
                     self.discard_parts();
@@ -474,14 +475,15 @@ impl Controller {
         let area = crate::x11::get().current_monitor();
         let area = Area { x: area.x, y: area.y, width: area.width, height: area.height };
         let this = Rc::downgrade(self);
-        let replay = match Replay::start(&self.config.borrow(), area, move |msg| {
+        let started = Replay::start(&self.config.borrow(), area, move |msg| {
             let Some(this) = this.upgrade() else { return };
             // Only report if this buffer is still the current one.
             if this.replay.borrow_mut().take().is_some() {
                 this.refresh_status();
                 this.emit(Event::Error(format!("The replay buffer stopped:\n{msg}")));
             }
-        }) {
+        });
+        let replay = match started {
             Ok(r) => Rc::new(r),
             Err(e) => return self.emit(Event::Error(format!("Replay buffer: {e:#}"))),
         };

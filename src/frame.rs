@@ -179,12 +179,16 @@ impl RecordFrame {
                     self.redraw();
                 }
             }
-            XEvent::ButtonRelease(e) if e.detail == 1 => match draw::hit(&self.hits.borrow(), e.event_x as i32, e.event_y as i32) {
-                Some("stop") => self.ctl.stop(),
-                Some("pause") => self.ctl.toggle_pause(),
-                Some("discard") => self.ctl.cancel(),
-                _ => {}
-            },
+            XEvent::ButtonRelease(e) if e.detail == 1 => {
+                // Don't hold `hits` borrowed: the controller calls back into redraw.
+                let h = draw::hit(&self.hits.borrow(), e.event_x as i32, e.event_y as i32);
+                match h {
+                    Some("stop") => self.ctl.stop(),
+                    Some("pause") => self.ctl.toggle_pause(),
+                    Some("discard") => self.ctl.cancel(),
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
