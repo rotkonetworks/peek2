@@ -147,8 +147,10 @@ and tray menu write the common ones for you.
 - `pactl` (PulseAudio or PipeWire)
 - optional: `notify-send` for notifications, `xdg-open` to open clips,
   `zenity` or `kdialog` for `ask_save_location`
-- a compositor (e.g. picom) for the translucent overlay. Without one, the
-  selector shows a dimmed frozen screenshot instead.
+- optional: a compositor (e.g. picom) for the translucent record bar. The
+  selector always shows a dimmed frozen screenshot, which works under any
+  compositor setup; `PEEK2_LIVE_SELECT=1` makes it see-through instead
+  (this breaks with picom's `unredir-if-possible`).
 
 Text is drawn with the X server's built-in bitmap fonts (misc-fixed), so
 there are no font dependencies. On HiDPI screens the UI scales with `Xft.dpi`

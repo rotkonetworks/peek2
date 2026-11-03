@@ -2,8 +2,10 @@
 //! the pointer. Drag to select, click to pick a window, then record from the
 //! toolbar under the selection.
 //!
-//! With a compositor the overlay is a see-through ARGB window; without one
-//! it shows a frozen screenshot of the monitor, dimmed outside the selection.
+//! The overlay shows a frozen screenshot of the monitor, dimmed outside the
+//! selection. A see-through ARGB window is only a fallback (or opt-in with
+//! PEEK2_LIVE_SELECT=1): compositors that unredirect full-screen windows
+//! (picom's unredir-if-possible) keep it opaque, hiding the screen.
 
 use crate::config::{Config, FIT_PRESETS};
 use crate::controller::Controller;
@@ -83,7 +85,10 @@ impl Selector {
         ctl.reload_config();
         let windows = x.client_rects();
         let mon = x.current_monitor();
-        let blend = x.can_blend();
+        // Grab before the overlay exists so it can't end up in the shot.
+        let live = std::env::var_os("PEEK2_LIVE_SELECT").is_some() && x.can_blend();
+        let data = if live { None } else { x.screenshot(mon) };
+        let blend = data.is_none() && x.can_blend();
         let events = EventMask::EXPOSURE | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION | EventMask::KEY_PRESS;
         let (win, depth) = match x.popup(mon, blend, events) {
             Ok(w) => w,
@@ -92,7 +97,7 @@ impl Selector {
                 return None;
             }
         };
-        let shot = if blend { None } else { screenshot(&x, win, mon) };
+        let shot = data.and_then(|d| screenshot(&x, win, mon, d));
         let this = Rc::new(Selector {
             x: x.clone(),
             ctl: ctl.clone(),
@@ -601,8 +606,7 @@ fn hint(s: &Surface, w: i32) {
 
 /// Grab the monitor once (compositor-less setups) into two server-side
 /// pixmaps: as is, and dimmed like the scrim.
-fn screenshot(x: &Rc<X>, win: u32, mon: Rect) -> Option<(u32, u32)> {
-    let data = x.screenshot(mon)?;
+fn screenshot(x: &Rc<X>, win: u32, mon: Rect, data: Vec<u8>) -> Option<(u32, u32)> {
     let a = SCRIM_ALPHA;
     let keep = 1.0 - a;
     let sc = [(SCRIM & 0xff) as f64 * a, ((SCRIM >> 8) & 0xff) as f64 * a, ((SCRIM >> 16) & 0xff) as f64 * a];
