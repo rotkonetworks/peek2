@@ -211,6 +211,8 @@ pub enum Item {
     Dot(bool),
     Text(String, u32),
     Button { id: &'static str, label: String, style: Style },
+    /// A colour chip with its name; clickable.
+    Swatch { id: &'static str, rgb: u32, label: String },
     /// Per source: (name, left dBFS, right dBFS, silent).
     Meters(Vec<(&'static str, f32, f32, bool)>),
 }
@@ -237,6 +239,7 @@ fn item_width(item: &Item, m: &Metrics) -> i32 {
         Item::Dot(_) => 10 * m.s,
         Item::Text(t, _) => f.text_width(t),
         Item::Button { label, .. } => f.text_width(label) + 2 * (m.btn_pad + 3 * m.s),
+        Item::Swatch { label, .. } => f.text_width(label) + 2 * (m.btn_pad + 3 * m.s) + 12 * m.s,
         Item::Meters(v) => v.iter().map(|(n, ..)| f.text_width(n) + 4 * m.s + 56 * m.s).sum::<i32>() + (v.len() as i32 - 1).max(0) * m.gap,
     }
 }
@@ -280,6 +283,18 @@ pub fn draw_bar(surf: &Surface, x: i32, y: i32, items: &[Item], hover: Option<&s
                 surf.fill(r, bg, 1.0);
                 surf.stroke(r, border);
                 surf.text(cx + (iw - f.text_width(label)) / 2, text_y, label, ink);
+                hits.push((*id, r));
+            }
+            Item::Swatch { id, rgb, label } => {
+                let r = Rect::new(cx, top, iw, m.h);
+                let hot = hover == Some(*id);
+                surf.fill(r, if hot { LINE_SOFT } else { ELEV2 }, 1.0);
+                surf.stroke(r, LINE_SOFT);
+                let chip = 8 * m.s;
+                let cxp = cx + m.btn_pad + 2 * m.s;
+                surf.fill(Rect::new(cxp, top + (m.h - chip) / 2, chip, chip), *rgb, 1.0);
+                surf.stroke(Rect::new(cxp, top + (m.h - chip) / 2, chip, chip), LINE);
+                surf.text(cxp + chip + 4 * m.s, text_y, label, FG_HIGH);
                 hits.push((*id, r));
             }
             Item::Meters(v) => {

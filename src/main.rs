@@ -1,3 +1,4 @@
+mod annotate;
 mod audio;
 mod config;
 mod controller;

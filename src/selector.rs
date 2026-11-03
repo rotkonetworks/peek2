@@ -1,12 +1,13 @@
 //! Flameshot-style region picker: a dimmed overlay over the monitor under
-//! the pointer. Drag to select, click to pick a window, then record from the
-//! toolbar under the selection.
+//! the pointer. Drag to select, click to pick a window, then record, or
+//! draw on it (pen, arrow, box, marker, blur) and copy/save a screenshot.
 //!
 //! The overlay shows a frozen screenshot of the monitor, dimmed outside the
 //! selection. A see-through ARGB window is only a fallback (or opt-in with
 //! PEEK2_LIVE_SELECT=1): compositors that unredirect full-screen windows
 //! (picom's unredir-if-possible) keep it opaque, hiding the screen.
 
+use crate::annotate::{Canvas, Tool, COLORS};
 use crate::config::{Config, FIT_PRESETS};
 use crate::controller::Controller;
 use crate::draw::{self, Item, Style, Surface};
@@ -31,6 +32,8 @@ enum Drag {
     New { x0: i32, y0: i32 },
     Move { orig: Rect, x0: i32, y0: i32 },
     Resize { orig: Rect, fx: u8, fy: u8, x0: i32, y0: i32 },
+    /// Drawing a mark with the current tool.
+    Draw,
 }
 
 /// Handle positions as (fx, fy) in halves: 0 = left/top, 1 = middle, 2 = right/bottom.
@@ -62,7 +65,13 @@ pub struct Selector {
     /// Screenshot mode: (bright, dimmed) pixmaps of the monitor.
     shot: Option<(u32, u32)>,
     /// The frozen frame itself (BGRX), for still screenshots.
-    frame: Option<Vec<u8>>,
+    frame: Option<Rc<Vec<u8>>>,
+    /// Frame plus marks; None in live mode (nothing to draw on).
+    canvas: RefCell<Option<Canvas>>,
+    tool: Cell<Option<Tool>>,
+    color: Cell<usize>,
+    /// Stroke size step, 1-6 (scroll wheel).
+    size: Cell<i32>,
     /// Opened for a screenshot: Enter saves a PNG instead of recording.
     still: bool,
     surf: RefCell<Option<Surface>>,
@@ -103,6 +112,11 @@ impl Selector {
             }
         };
         let shot = data.as_deref().and_then(|d| screenshot(&x, win, mon, d));
+        let data = data.map(Rc::new);
+        let canvas = match (shot, &data) {
+            (Some((bright, _)), Some(d)) => Canvas::new(&x, win, bright, d.clone(), mon.width, mon.height),
+            _ => None,
+        };
         let this = Rc::new(Selector {
             x: x.clone(),
             ctl: ctl.clone(),
@@ -111,6 +125,10 @@ impl Selector {
             blend,
             shot,
             frame: data,
+            canvas: RefCell::new(canvas),
+            tool: Cell::new(None),
+            color: Cell::new(0),
+            size: Cell::new(1),
             still,
             surf: RefCell::new(Surface::new(&x, win, depth, mon.width, mon.height)),
             sel: Cell::new(None),
@@ -210,6 +228,19 @@ impl Selector {
         let btn = draw::hit(&self.hits.borrow(), x, y);
         match button {
             1 if btn.is_some() => self.pressed_btn.set(btn),
+            1 if self.can_draw(x, y) => {
+                let (name_rgb, size) = (COLORS[self.color.get()].1, self.size.get());
+                if let (Some(tool), Some(c)) = (self.tool.get(), self.canvas.borrow_mut().as_mut()) {
+                    c.begin(tool, name_rgb, size, x, y);
+                }
+                self.drag.set(Drag::Draw);
+                self.redraw();
+            }
+            4 | 5 if self.tool.get().is_some() => {
+                let d = if button == 4 { 1 } else { -1 };
+                self.size.set((self.size.get() + d).clamp(1, 6));
+                self.redraw();
+            }
             1 => {
                 let (t0, x0, y0) = self.last_click.replace((time, x, y));
                 let double = time.wrapping_sub(t0) < 400 && (x - x0).abs() < 5 && (y - y0).abs() < 5;
@@ -239,6 +270,12 @@ impl Selector {
         }
     }
 
+    /// A press at (x, y) draws: a tool is chosen and it's not on a handle.
+    fn can_draw(&self, x: i32, y: i32) -> bool {
+        let Some(r) = self.sel.get() else { return false };
+        self.tool.get().is_some() && self.canvas.borrow().is_some() && self.handle_at(r, x, y).is_none()
+    }
+
     fn handle_at(&self, r: Rect, x: i32, y: i32) -> Option<(u8, u8)> {
         let reach = 8 * self.x.ui_scale();
         HANDLES.into_iter().find(|&(fx, fy)| {
@@ -251,6 +288,11 @@ impl Selector {
         self.pointer.set(Some((x, y)));
         let (w, h) = self.size();
         match self.drag.get() {
+            Drag::Draw => {
+                if let Some(c) = self.canvas.borrow_mut().as_mut() {
+                    c.extend(x, y);
+                }
+            }
             Drag::Pending { x0, y0 } => {
                 if (x - x0).abs() + (y - y0).abs() >= 4 {
                     self.drag.set(Drag::New { x0, y0 });
@@ -293,6 +335,7 @@ impl Selector {
                         Some((0, 2)) => cursor::BOTTOM_LEFT,
                         Some((1, _)) => cursor::V_DOUBLE,
                         Some(_) => cursor::H_DOUBLE,
+                        None if self.tool.get().is_some() => cursor::PENCIL,
                         None if r.contains(x, y) => cursor::FLEUR,
                         None => cursor::CROSSHAIR,
                     },
@@ -315,6 +358,11 @@ impl Selector {
             return;
         }
         match self.drag.replace(Drag::None) {
+            Drag::Draw => {
+                if let Some(c) = self.canvas.borrow_mut().as_mut() {
+                    c.end();
+                }
+            }
             // A click: pick the hovered window, if any.
             Drag::Pending { .. } => {
                 if self.sel.get().is_none() {
@@ -343,6 +391,9 @@ impl Selector {
             "copy" => return self.capture(false),
             "save" => return self.capture(true),
             "cancel" => return self.close(),
+            "color" => self.color.set((self.color.get() + 1) % COLORS.len()),
+            "undo" => self.undo(),
+            t if Tool::from_id(t).is_some() => self.toggle_tool(Tool::from_id(t)),
             "fmt" => self.ctl.update_config(|c| c.format = c.format.next()),
             "audio" => self.ctl.update_config(|c| c.audio = c.audio.next()),
             "mouse" => self.ctl.update_config(|c| c.capture_mouse = !c.capture_mouse),
@@ -353,6 +404,24 @@ impl Selector {
             self.restart_preview();
         }
         self.redraw();
+    }
+
+    fn toggle_tool(&self, t: Option<Tool>) {
+        if self.canvas.borrow().is_none() || self.sel.get().is_none() {
+            return;
+        }
+        self.tool.set(if self.tool.get() == t { None } else { t });
+        self.set_cursor(if self.tool.get().is_some() { cursor::PENCIL } else { cursor::CROSSHAIR });
+    }
+
+    fn undo(&self) {
+        if let Some(c) = self.canvas.borrow_mut().as_mut() {
+            c.undo();
+        }
+    }
+
+    fn annotated(&self) -> bool {
+        self.canvas.borrow().as_ref().is_some_and(|c| !c.is_empty())
     }
 
     fn key(self: &Rc<Self>, code: u8, state: u16) {
@@ -369,9 +438,24 @@ impl Selector {
         if ctrl && sym == 's' as u32 {
             return self.capture(true);
         }
+        if ctrl && sym == 'z' as u32 {
+            self.undo();
+            return self.redraw();
+        }
+        if !ctrl {
+            if let Some(t) = Tool::ALL.into_iter().find(|t| sym == t.key() as u32) {
+                self.toggle_tool(Some(t));
+                return self.redraw();
+            }
+            if sym == 'c' as u32 {
+                self.color.set((self.color.get() + 1) % COLORS.len());
+                return self.redraw();
+            }
+        }
         let step = if shift { 10 } else { 1 };
         let (w, h) = self.size();
         match sym {
+            keysym::ESCAPE if self.tool.get().is_some() => self.toggle_tool(self.tool.get()),
             keysym::ESCAPE => return self.close(),
             keysym::RETURN | keysym::KP_ENTER => return self.accept(),
             s if s == keysym::SPACE || s == 'f' as u32 => {
@@ -444,8 +528,35 @@ impl Selector {
         if let Some(m) = self.levels.borrow().item() {
             v.push(m);
         }
-        v.push(Item::Button { id: "record", label: "record".into(), style: Style::Primary });
+        // Marks only exist in the still: once drawn on, it's a screenshot.
+        let annotated = self.annotated();
+        v.push(Item::Button { id: "copy", label: "copy".into(), style: Style::Normal });
+        v.push(Item::Button { id: "save", label: "save png".into(), style: if annotated { Style::Primary } else { Style::Normal } });
+        if !annotated {
+            v.push(Item::Button { id: "record", label: "record".into(), style: Style::Primary });
+        }
         v.push(Item::Button { id: "cancel", label: "x".into(), style: Style::Flat });
+        v
+    }
+
+    /// Drawing tools, when there is a frozen frame to draw on.
+    fn tool_items(&self) -> Vec<Item> {
+        if self.canvas.borrow().is_none() {
+            return Vec::new();
+        }
+        let cur = self.tool.get();
+        let mut v: Vec<Item> = Tool::ALL
+            .into_iter()
+            .map(|t| Item::Button { id: t.id(), label: t.id().into(), style: if cur == Some(t) { Style::Primary } else { Style::Normal } })
+            .collect();
+        let (name, rgb) = COLORS[self.color.get()];
+        v.push(Item::Swatch { id: "color", rgb, label: name.into() });
+        if cur.is_some() {
+            v.push(Item::Text(format!("size {}", self.size.get()), draw::MUTED));
+        }
+        if self.annotated() {
+            v.push(Item::Button { id: "undo", label: "undo".into(), style: Style::Flat });
+        }
         v
     }
 
@@ -486,7 +597,10 @@ impl Selector {
         if let Some(r) = target {
             // The hole shows the live screen (or the bright screenshot).
             match self.shot {
-                Some((bright, _)) => s.copy_from(bright, r.x, r.y, r),
+                Some((bright, _)) => {
+                    let src = self.canvas.borrow().as_ref().map_or(bright, |c| c.pixmap);
+                    s.copy_from(src, r.x, r.y, r)
+                }
                 None if self.blend => s.clear(r),
                 None => {}
             }
@@ -515,17 +629,25 @@ impl Selector {
         if let (Some(r), false) = (sel, dragging)
             && r.width >= 2 && r.height >= 2 {
                 let items = self.toolbar_items(r);
+                let tools = self.tool_items();
                 let (tw, th) = draw::bar_size(&items);
                 let gap = 6 * sc;
+                let (tw2, th2) = if tools.is_empty() { (0, 0) } else { draw::bar_size(&tools) };
+                let extra = if tools.is_empty() { 0 } else { th2 + 2 * sc };
+                let block = th + extra;
                 let tx = (r.x + r.width / 2 - tw / 2).clamp(0, (w - tw).max(0));
-                let ty = if r.y + r.height + gap + th <= h {
+                let ty = if r.y + r.height + gap + block <= h {
                     r.y + r.height + gap
-                } else if r.y - gap - th >= 0 {
-                    r.y - gap - th
+                } else if r.y - gap - block >= 0 {
+                    r.y - gap - block
                 } else {
-                    (r.y + r.height - th - gap).max(0)
+                    (r.y + r.height - block - gap).max(0)
                 };
                 hits = draw::draw_bar(s, tx, ty, &items, self.hover_btn.get());
+                if !tools.is_empty() {
+                    let tx2 = (r.x + r.width / 2 - tw2 / 2).clamp(0, (w - tw2).max(0));
+                    hits.extend(draw::draw_bar(s, tx2, ty + th + 2 * sc, &tools, self.hover_btn.get()));
+                }
             }
         *self.hits.borrow_mut() = hits;
         s.present(self.win);
@@ -541,7 +663,7 @@ impl Selector {
 
     /// Enter / double-click: record, or save the screenshot.
     fn accept(self: &Rc<Self>) {
-        if self.still {
+        if self.still || self.annotated() {
             self.capture(true)
         } else {
             self.record()
@@ -554,7 +676,11 @@ impl Selector {
         if r.width < 1 || r.height < 1 {
             return;
         }
-        let img = self.frame.as_deref().map(|f| Image::crop(f, self.mon.width, r.x, r.y, r.width, r.height));
+        let marked = self.canvas.borrow().as_ref().filter(|c| !c.is_empty()).and_then(|c| c.read(r));
+        let img = match marked {
+            Some(data) => Some(Image { width: r.width, height: r.height, data }),
+            None => self.frame.as_deref().map(|f| Image::crop(f, self.mon.width, r.x, r.y, r.width, r.height)),
+        };
         let (x, ctl) = (self.x.clone(), self.ctl.clone());
         let area = Rect::new(self.mon.x + r.x, self.mon.y + r.y, r.width, r.height);
         self.finish(None);
@@ -589,6 +715,7 @@ impl Selector {
         self.x.ungrab();
         self.x.destroy(self.win);
         self.surf.borrow_mut().take();
+        self.canvas.borrow_mut().take();
         if let Some((a, b)) = self.shot {
             let _ = self.x.conn.free_pixmap(a);
             let _ = self.x.conn.free_pixmap(b);
@@ -639,7 +766,7 @@ fn tag(s: &Surface, x: i32, y: i32, text: &str, ink: u32) {
 
 fn hint(s: &Surface, w: i32, still: bool) {
     let enter = if still { "save" } else { "record" };
-    let keys = [("drag", "region"), ("click", "window"), ("space", "screen"), ("enter", enter), ("ctrl+c", "copy"), ("esc", "cancel")];
+    let keys = [("drag", "region"), ("click", "window"), ("space", "screen"), ("enter", enter), ("ctrl+c", "copy"), ("p a r m b", "draw"), ("esc", "cancel")];
     let f = draw::font();
     let sc = crate::x11::get().ui_scale();
     let gap = 3 * f.width;

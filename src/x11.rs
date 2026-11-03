@@ -28,6 +28,12 @@ impl Rect {
         Rect { x, y, width, height }
     }
 
+    pub fn intersect(&self, o: Rect) -> Rect {
+        let (x0, y0) = (self.x.max(o.x), self.y.max(o.y));
+        let (x1, y1) = ((self.x + self.width).min(o.x + o.width), (self.y + self.height).min(o.y + o.height));
+        Rect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
+    }
+
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.x && y >= self.y && x < self.x + self.width && y < self.y + self.height
     }
@@ -496,6 +502,11 @@ impl X {
     /// Root window pixels as BGRX rows, if the server uses the usual
     /// 32-bit little-endian layout for its depth.
     pub fn screenshot(&self, r: Rect) -> Option<Vec<u8>> {
+        self.get_image(self.root, r)
+    }
+
+    /// Pixels of `r` in a root-depth drawable, as BGRX rows.
+    pub fn get_image(&self, drawable: u32, r: Rect) -> Option<Vec<u8>> {
         let setup = self.conn.setup();
         let bpp = setup.pixmap_formats.iter().find(|f| f.depth == self.root_depth).map(|f| f.bits_per_pixel);
         if bpp != Some(32) || setup.image_byte_order != xproto::ImageOrder::LSB_FIRST {
@@ -503,7 +514,7 @@ impl X {
         }
         let img = self
             .conn
-            .get_image(xproto::ImageFormat::Z_PIXMAP, self.root, r.x as i16, r.y as i16, r.width as u16, r.height as u16, !0)
+            .get_image(xproto::ImageFormat::Z_PIXMAP, drawable, r.x as i16, r.y as i16, r.width as u16, r.height as u16, !0)
             .ok()?
             .reply()
             .ok()?;
@@ -512,6 +523,12 @@ impl X {
 
     /// PutImage in row bands that fit the request size limit.
     pub fn put_image(&self, drawable: u32, gc: u32, w: u16, h: u16, depth: u8, data: &[u8]) {
+        self.put_image_at(drawable, gc, 0, 0, w, h, depth, data)
+    }
+
+    /// PutImage at (dx, dy), in row bands that fit the request size limit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_image_at(&self, drawable: u32, gc: u32, dx: i32, dy: i32, w: u16, h: u16, depth: u8, data: &[u8]) {
         let stride = w as usize * 4;
         let rows = (self.max_chunk.max(stride) / stride).max(1);
         let mut y = 0usize;
@@ -523,8 +540,8 @@ impl X {
                 gc,
                 w,
                 n as u16,
-                0,
-                y as i16,
+                dx as i16,
+                (dy + y as i32) as i16,
                 0,
                 depth,
                 &data[y * stride..(y + n) * stride],
@@ -739,6 +756,7 @@ pub mod cursor {
     pub const CROSSHAIR: u16 = 34;
     pub const FLEUR: u16 = 52;
     pub const LEFT_PTR: u16 = 68;
+    pub const PENCIL: u16 = 86;
     pub const H_DOUBLE: u16 = 108;
     pub const V_DOUBLE: u16 = 116;
     pub const TOP_LEFT: u16 = 134;

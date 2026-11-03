@@ -33,8 +33,17 @@ ends, the parts are joined without re-encoding.
 **Ctrl+Alt+P** (or `peek2 --screenshot`, or the tray menu) opens the same
 selector for a still: **Enter** saves a PNG to `~/Pictures/Peek2` and copies
 it, **Ctrl+C** only copies it. The picture is the frame frozen when the
-selector opened, so menus and tooltips stay in it. Ctrl+C and Ctrl+S work in
-the recording selector too.
+selector opened, so menus and tooltips stay in it. Ctrl+C and Ctrl+S (or the
+copy / save png buttons) work in the recording selector too.
+
+### Drawing on screenshots
+
+A second toolbar under the selection has **pen** (P), **arrow** (A), **box**
+(R), **marker** (M, a highlighter) and **blur** (B, pixelates, for hiding
+secrets). C or the colour chip cycles colours, the scroll wheel changes the
+thickness, **Ctrl+Z** undoes, Esc puts the tool down. Once you've drawn
+something the selection is a screenshot: Enter saves it with the marks, and
+the record button goes away until you undo them all.
 
 ## Fit to size
 
