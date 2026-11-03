@@ -46,7 +46,7 @@ copy / save png buttons) work in the recording selector too.
 ### Drawing on screenshots
 
 A second toolbar under the selection has **pen** (P), **arrow** (A), **box**
-(R), **marker** (M, a highlighter) and **blur** (B, pixelates, for hiding
+(R), **marker** (M, a highlighter), numbered **steps** (N) and **blur** (B, pixelates, for hiding
 secrets). C or the colour chip cycles colours, the scroll wheel changes the
 thickness, **Ctrl+Z** undoes and **Ctrl+Shift+Z** / **Ctrl+Y** redoes, Esc
 puts the tool down. Once you've drawn

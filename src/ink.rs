@@ -17,7 +17,7 @@ use x11rb::protocol::xproto::{self, ConnectionExt as _, EventMask, ModMask};
 use x11rb::protocol::Event;
 
 /// Tools that make sense on live video (blur would need the video itself).
-pub const TOOLS: [Tool; 4] = [Tool::Pen, Tool::Arrow, Tool::Box, Tool::Marker];
+pub const TOOLS: [Tool; 5] = [Tool::Pen, Tool::Arrow, Tool::Box, Tool::Marker, Tool::Step];
 
 pub struct LiveInk {
     x: Rc<X>,

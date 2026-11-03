@@ -16,10 +16,12 @@ pub enum Tool {
     Box,
     Marker,
     Blur,
+    /// Numbered circles, 1, 2, 3… in the order placed.
+    Step,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 5] = [Tool::Pen, Tool::Arrow, Tool::Box, Tool::Marker, Tool::Blur];
+    pub const ALL: [Tool; 6] = [Tool::Pen, Tool::Arrow, Tool::Box, Tool::Marker, Tool::Step, Tool::Blur];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -28,6 +30,7 @@ impl Tool {
             Tool::Box => "box",
             Tool::Marker => "marker",
             Tool::Blur => "blur",
+            Tool::Step => "1 2 3",
         }
     }
 
@@ -43,6 +46,7 @@ impl Tool {
             Tool::Box => 'r',
             Tool::Marker => 'm',
             Tool::Blur => 'b',
+            Tool::Step => 'n',
         }
     }
 
@@ -52,6 +56,7 @@ impl Tool {
             Tool::Pen | Tool::Arrow | Tool::Box => 3,
             Tool::Marker => 16,
             Tool::Blur => 12, // block size
+            Tool::Step => 4,  // radius step
         }
     }
 
@@ -70,13 +75,15 @@ pub struct Mark {
     rgb: u32,
     width: i32,
     pts: Vec<(i32, i32)>,
+    /// Step tool: the number shown.
+    n: u32,
 }
 
 impl Mark {
     /// Worth keeping: a dot for freehand, some extent otherwise.
     fn is_visible(&self) -> bool {
         match (self.pts.first(), self.pts.last()) {
-            (Some(a), Some(b)) => self.tool.freehand() || (a.0 - b.0).abs() + (a.1 - b.1).abs() >= 3,
+            (Some(a), Some(b)) => self.tool.freehand() || self.tool == Tool::Step || (a.0 - b.0).abs() + (a.1 - b.1).abs() >= 3,
             _ => false,
         }
     }
@@ -127,7 +134,8 @@ impl Marks {
 
     pub fn begin(&mut self, tool: Tool, rgb: u32, size: i32, x: i32, y: i32) {
         let width = tool.base_width() * size.max(1);
-        self.current = Some(Mark { tool, rgb, width, pts: vec![(x, y)] });
+        let n = self.done.iter().filter(|m| m.tool == Tool::Step).count() as u32 + 1;
+        self.current = Some(Mark { tool, rgb, width, pts: vec![(x, y)], n });
     }
 
     pub fn extend(&mut self, x: i32, y: i32) -> Change {
@@ -141,6 +149,10 @@ impl Marks {
             // Marker strokes are drawn as one polyline (AND/stipple must
             // not be applied twice where segments meet): redraw it whole.
             if m.tool == Tool::Pen { Change::Segment(last, (x, y)) } else { Change::All }
+        } else if m.tool == Tool::Step {
+            // Dragging places the circle.
+            m.pts = vec![(x, y)];
+            Change::All
         } else {
             m.pts.truncate(1);
             m.pts.push((x, y));
@@ -241,6 +253,24 @@ pub fn paint(x: &X, d: u32, gc: u32, m: &Mark, ink: Ink) {
             };
             let tri = [pt(b.0, b.1), side(1.0), side(-1.0)];
             let _ = c.fill_poly(d, gc, PolyShape::CONVEX, CoordMode::ORIGIN, &tri);
+        }
+        Tool::Step => {
+            let r = 8 + m.width;
+            let arc = xproto::Arc { x: (b.0 - r) as i16, y: (b.1 - r) as i16, width: (2 * r) as u16, height: (2 * r) as u16, angle1: 0, angle2: 360 * 64 };
+            let _ = c.poly_fill_arc(d, gc, &[arc]);
+            if !matches!(ink, Ink::Mask { .. }) {
+                let f = crate::draw::font();
+                let label = m.n.to_string();
+                // Dark digits on light colours, white otherwise.
+                let lum = ((m.rgb >> 16) & 0xff) * 3 + ((m.rgb >> 8) & 0xff) * 6 + (m.rgb & 0xff);
+                let ink_rgb = if lum > 1500 { 0x101010 } else { 0xffffff };
+                let _ = c.change_gc(gc, &xproto::ChangeGCAux::new().foreground(ink_rgb).font(f.id));
+                let tx = b.0 - f.text_width(&label) / 2;
+                let ty = b.1 - f.height() / 2 + f.ascent;
+                let mut items = vec![label.len() as u8, 0];
+                items.extend_from_slice(label.as_bytes());
+                let _ = c.poly_text8(d, gc, tx as i16, ty as i16, &items);
+            }
         }
         Tool::Blur => {}
     }
