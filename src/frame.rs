@@ -299,7 +299,11 @@ impl RecordFrame {
             }
             Event::Saved => {}
             Event::Error(msg) => {
-                self.close();
+                // A failed take ends Idle; other errors (replay buffer, a
+                // screenshot) must not hide the bar of a running recording.
+                if self.ctl.phase() == Phase::Idle {
+                    self.close();
+                }
                 util::notify_error(msg);
             }
         }

@@ -50,6 +50,9 @@ pub struct Controller {
     resume_pending: Cell<bool>,
     area: Cell<Option<Area>>,
     replay: RefCell<Option<Rc<Replay>>>,
+    /// Settings of the running take, fixed at its start: changing the
+    /// format or audio mid-take (tray menu) must not mix containers.
+    take: RefCell<Config>,
 }
 
 impl Controller {
@@ -70,6 +73,7 @@ impl Controller {
             resume_pending: Cell::new(false),
             area: Cell::new(None),
             replay: RefCell::new(None),
+            take: RefCell::new(Config::default()),
         })
     }
 
@@ -121,7 +125,7 @@ impl Controller {
             Phase::Recording(d) => self.status("recording", &util::format_time(d.as_secs())),
             Phase::Paused(d) => self.status("paused", &util::format_time(d.as_secs())),
             Phase::Processing => {
-                let fmt = self.config.borrow().format;
+                let fmt = self.take.borrow().format;
                 self.status("processing", &format!("{}…", fmt.label()))
             }
         }
@@ -160,6 +164,7 @@ impl Controller {
             return;
         }
         self.reload_config();
+        *self.take.borrow_mut() = self.config.borrow().clone();
         self.cancelled.set(false);
         self.discard_parts();
         self.area.set(Some(area));
@@ -223,7 +228,7 @@ impl Controller {
                 }
             }
         };
-        let started = Recording::start(area, &self.config.borrow(), levels, on_exit);
+        let started = Recording::start(area, &self.take.borrow(), levels, on_exit);
         let rec = match started {
             Ok(r) => Rc::new(r),
             Err(e) => return self.fail(format!("{e:#}")),
@@ -252,9 +257,10 @@ impl Controller {
             return self.set_phase(Phase::Idle);
         }
         if let Err(e) = res {
-            let _ = std::fs::remove_file(&rec.output);
+            let mut keep = std::mem::take(&mut *self.parts.borrow_mut());
+            keep.push(rec.output.clone());
             self.discard_parts();
-            return self.fail(format!("{e:#}"));
+            return self.fail(format!("{e:#}{}", self.rescue(&keep)));
         }
         self.parts.borrow_mut().push(rec.output.clone());
         match self.phase() {
@@ -277,10 +283,8 @@ impl Controller {
             move |res| match res {
                 Ok(raw) => this.finish(raw),
                 Err(e) => {
-                    for p in &parts {
-                        let _ = std::fs::remove_file(p);
-                    }
-                    this.fail(format!("Joining the paused parts failed: {e:#}"));
+                    let kept = this.rescue(&parts);
+                    this.fail(format!("Joining the paused parts failed: {e:#}{kept}"));
                 }
             },
         );
@@ -302,6 +306,9 @@ impl Controller {
                 if let Some(rec) = rec {
                     if rec.elapsed() < Duration::from_millis(500) && self.parts.borrow().is_empty() {
                         self.cancel();
+                        if self.take.borrow().notify {
+                            util::notify("short", "Recording discarded", "It was shorter than half a second.", &[], |_| {});
+                        }
                     } else {
                         self.stop_timer();
                         rec.stop();
@@ -374,7 +381,8 @@ impl Controller {
         self.set_phase(Phase::Processing);
         let job = Job::default();
         *self.job.borrow_mut() = Some(job.clone());
-        let cfg = self.config.borrow().clone();
+        let cfg = self.take.borrow().clone();
+        let raw_kept = raw.clone();
         let this = self.clone();
         let cfg2 = cfg.clone();
         rt::background(
@@ -389,7 +397,10 @@ impl Controller {
                 }
                 let file = match res {
                     Ok(f) => f,
-                    Err(e) => return this.fail(format!("{e:#}")),
+                    Err(e) => {
+                        let kept = this.rescue(std::slice::from_ref(&raw_kept));
+                        return this.fail(format!("{e:#}{kept}"));
+                    }
                 };
                 let t2 = this.clone();
                 this.deliver(file, &cfg, cfg.save_dir(), cfg.format.ext(), "", move |dest| {
@@ -401,6 +412,18 @@ impl Controller {
                 });
             },
         );
+    }
+
+    /// After a failure: move whatever was recorded into the save folder
+    /// instead of deleting it. Returns a note for the error message.
+    fn rescue(&self, files: &[PathBuf]) -> String {
+        let dir = self.take.borrow().save_dir();
+        let kept = rescue_files(files, &dir, "unprocessed");
+        match kept.as_slice() {
+            [] => String::new(),
+            [one] => format!("\n\nThe recording was kept: {}", one.display()),
+            many => format!("\n\nThe recorded parts were kept in {} ({} files)", dir.display(), many.len()),
+        }
     }
 
     fn saved_status(self: &Rc<Self>, dest: &Path) {
@@ -603,6 +626,50 @@ pub fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o644));
     Ok(())
+}
+
+/// Move non-empty `files` into `dir` as "Peek <label> <n>.<ext>"; empty
+/// ones are deleted. Returns where they went.
+pub fn rescue_files(files: &[PathBuf], dir: &Path, label: &str) -> Vec<PathBuf> {
+    let _ = std::fs::create_dir_all(dir);
+    let stamp = util::strftime("%Y-%m-%d %H-%M-%S").unwrap_or_default();
+    let mut kept = Vec::new();
+    for (i, f) in files.iter().enumerate() {
+        if std::fs::metadata(f).map(|m| m.len()).unwrap_or(0) == 0 {
+            let _ = std::fs::remove_file(f);
+            continue;
+        }
+        let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("mkv");
+        let n = if files.len() > 1 { format!(" part {}", i + 1) } else { String::new() };
+        let dest = unique_path(&dir.join(format!("Peek {label} {stamp}{n}.{ext}")));
+        if move_file(f, &dest).is_ok() {
+            kept.push(dest);
+        }
+    }
+    kept
+}
+
+/// Start-up: recordings left in the cache by a crash or power loss are
+/// moved to the save folder; other leftovers (logs, lists) are deleted.
+pub fn recover_leftovers(save_dir: &Path) -> Vec<PathBuf> {
+    let dir = util::cache_dir().join("peek2");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut videos = Vec::new();
+    for e in entries.flatten() {
+        let p = e.path();
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if !name.starts_with("rec-") {
+            continue;
+        }
+        match p.extension().and_then(|x| x.to_str()) {
+            Some("mkv" | "mp4" | "webm" | "ts") => videos.push(p),
+            _ => {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+    videos.sort();
+    rescue_files(&videos, save_dir, "recovered")
 }
 
 fn notify_saved(path: &Path, copied: bool) {

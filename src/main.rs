@@ -96,7 +96,9 @@ fn app() -> Rc<App> {
 
 impl App {
     fn open_selector(&self, still: bool) {
-        if self.ctl.is_busy() {
+        // Screenshots are allowed during a recording (the overlay shows in
+        // the clip while it's open, as with any screenshot tool).
+        if self.ctl.is_busy() && !still {
             return;
         }
         selector::open(&self.ctl, still, |res| {
@@ -293,6 +295,18 @@ fn main() -> ExitCode {
         };
         app().run(cmd);
     });
+    // A crash must not leave ffmpeg recording the screen in the background.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        proc::kill_all();
+        ipc::cleanup();
+        default_hook(info);
+    }));
+    let recovered = controller::recover_leftovers(&ctl.config.borrow().save_dir());
+    if !recovered.is_empty() {
+        let dir = ctl.config.borrow().save_dir();
+        util::notify("recovered", "Recovered recordings", &format!("{} unfinished recording(s) from last time are in {}", recovered.len(), dir.display()), &[("folder", "Show")], move |_| util::open(&dir));
+    }
     hw::probe();
     ctl.status("idle", "");
     if ctl.config.borrow().replay_on_start {

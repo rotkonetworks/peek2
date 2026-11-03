@@ -19,6 +19,16 @@ pub fn config_dir() -> PathBuf {
     xdg("XDG_CONFIG_HOME", ".config")
 }
 
+/// `~` or `~/…` to the home directory (paths typed into the settings).
+pub fn expand_home(p: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match (p, home) {
+        ("~", Some(h)) => h,
+        (p, Some(h)) if p.starts_with("~/") => h.join(&p[2..]),
+        (p, _) => PathBuf::from(p),
+    }
+}
+
 pub fn cache_dir() -> PathBuf {
     xdg("XDG_CACHE_HOME", ".cache")
 }

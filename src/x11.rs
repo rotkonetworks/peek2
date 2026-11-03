@@ -84,6 +84,7 @@ pub struct X {
     /// Window that owns our selections.
     owner: Window,
     handlers: RefCell<HashMap<Window, Handler>>,
+    scale: std::cell::Cell<Option<i32>>,
     root_handlers: RefCell<Vec<Handler>>,
     hotkeys: RefCell<Vec<Hotkey>>,
     keymap: RefCell<(u8, usize, Vec<u32>)>,
@@ -163,6 +164,7 @@ pub fn init() -> Result<Rc<X>> {
         argb,
         owner,
         handlers: RefCell::default(),
+        scale: Default::default(),
         root_handlers: RefCell::default(),
         hotkeys: RefCell::default(),
         keymap: RefCell::new((0, 1, Vec::new())),
@@ -439,7 +441,18 @@ impl X {
     }
 
     /// UI scale from Xft.dpi (1 at 96 dpi, 2 at 192 …).
+    /// UI scale from Xft.dpi (or PEEK2_SCALE), read once: it is asked for
+    /// on every redraw and each read is a server round trip.
     pub fn ui_scale(&self) -> i32 {
+        if let Some(s) = self.scale.get() {
+            return s;
+        }
+        let s = self.read_ui_scale();
+        self.scale.set(Some(s));
+        s
+    }
+
+    fn read_ui_scale(&self) -> i32 {
         if let Some(s) = std::env::var("PEEK2_SCALE").ok().and_then(|s| s.parse::<i32>().ok()) {
             return s.clamp(1, 4);
         }

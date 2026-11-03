@@ -44,7 +44,10 @@ pub fn run(input: PathBuf, cfg: &Config, job: &Job) -> Result<PathBuf> {
         Format::Gif => gif(&input, Some(fps), cfg.gif_quality, target(cfg), cfg.fit_strategy, job),
         Format::Apng => apng(&input, Some(fps), target(cfg), cfg.fit_strategy, job),
     };
-    let _ = std::fs::remove_file(&input);
+    // On failure the raw recording stays, so the caller can rescue it.
+    if result.is_ok() || job.is_cancelled() {
+        let _ = std::fs::remove_file(&input);
+    }
     if job.is_cancelled() {
         if let Ok(p) = &result {
             let _ = std::fs::remove_file(p);

@@ -457,14 +457,14 @@ impl Config {
 
     pub fn save_dir(&self) -> PathBuf {
         if !self.save_folder.is_empty() {
-            return PathBuf::from(&self.save_folder);
+            return crate::util::expand_home(&self.save_folder);
         }
         crate::util::videos_dir().join("Peek2")
     }
 
     pub fn screenshot_dir(&self) -> PathBuf {
         if !self.screenshot_folder.is_empty() {
-            return PathBuf::from(&self.screenshot_folder);
+            return crate::util::expand_home(&self.screenshot_folder);
         }
         crate::util::pictures_dir().join("Peek2")
     }

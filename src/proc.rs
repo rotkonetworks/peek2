@@ -16,6 +16,30 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Unique path in `~/.cache/peek2`.
+/// Running children, so a crash can stop them (ffmpeg keeps capturing
+/// the screen after its parent dies).
+static LIVE: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+fn track(pid: u32) {
+    if let Ok(mut l) = LIVE.lock() {
+        l.push(pid);
+    }
+}
+
+fn untrack(pid: u32) {
+    if let Ok(mut l) = LIVE.lock() {
+        l.retain(|p| *p != pid);
+    }
+}
+
+/// Terminate every child still running (from the panic hook).
+pub fn kill_all() {
+    let pids: Vec<u32> = LIVE.lock().map(|l| l.clone()).unwrap_or_default();
+    for pid in pids {
+        let _ = Command::new("kill").arg(pid.to_string()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+}
+
 pub fn temp_path(ext: &str) -> Result<PathBuf> {
     let dir = crate::util::cache_dir().join("peek2");
     std::fs::create_dir_all(&dir).context("creating cache dir")?;
@@ -69,6 +93,8 @@ impl Proc {
             }
         };
         let mut child = cmd.spawn().with_context(|| format!("failed to run {:?}", args[0]))?;
+        let pid = child.id();
+        track(pid);
         let stdin_pipe = child.stdin.take();
         let err_pipe = child.stderr.take();
         let child = Arc::new(Mutex::new(child));
@@ -132,6 +158,7 @@ impl Proc {
                 }
                 std::thread::sleep(Duration::from_millis(40));
             };
+            untrack(pid);
             if let Some(r) = reader {
                 let _ = r.join();
             }
@@ -171,10 +198,13 @@ pub fn run(args: &[OsString], cancel: Option<&AtomicBool>) -> Result<()> {
         .stderr(std::fs::File::create(&log)?)
         .spawn()
         .with_context(|| format!("failed to run {:?}", args[0]))?;
+    let pid = child.id();
+    track(pid);
     let status = loop {
         if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
             let _ = child.kill();
             let _ = child.wait();
+            untrack(pid);
             let _ = std::fs::remove_file(&log);
             bail!("cancelled");
         }
@@ -184,6 +214,7 @@ pub fn run(args: &[OsString], cancel: Option<&AtomicBool>) -> Result<()> {
             Err(e) => break Err(e),
         }
     };
+    untrack(pid);
     let msg = std::fs::read_to_string(&log).unwrap_or_default();
     let _ = std::fs::remove_file(&log);
     let tail: Vec<String> = msg.lines().rev().take(6).map(str::to_string).collect::<Vec<_>>().into_iter().rev().collect();

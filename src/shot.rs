@@ -32,7 +32,7 @@ impl Image {
         let size = format!("{}x{}", self.width, self.height);
         let mut child = Command::new("ffmpeg")
             .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "rawvideo", "-pix_fmt", "bgr0", "-s", &size, "-i", "-"])
-            .args(["-frames:v", "1", "-pix_fmt", "rgb24", "-compression_level", "9", "-f", "image2", "-c:v", "png"])
+            .args(["-frames:v", "1", "-pix_fmt", "rgb24", "-compression_level", "3", "-f", "image2", "-c:v", "png"])
             .arg(&out)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
