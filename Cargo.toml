@@ -11,7 +11,7 @@ readme = "README.md"
 # else is std plus tools already on the box (ffmpeg, pactl, notify-send).
 [dependencies]
 anyhow = "1.0.104"
-x11rb = { version = "0.13", features = ["randr"] }
+x11rb = { version = "0.13", features = ["randr", "shape"] }
 
 [profile.release]
 lto = "thin"

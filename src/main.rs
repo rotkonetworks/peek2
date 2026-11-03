@@ -6,6 +6,7 @@ mod draw;
 mod fit;
 mod frame;
 mod hw;
+mod ink;
 mod ipc;
 mod meter;
 mod postprocess;
@@ -38,6 +39,7 @@ usage: peek2 [command]
   -x, --stop          stop and save
   -c, --cancel        discard the recording
   -P, --pause         pause or resume
+  -d, --draw          draw on the running recording (again to stop)
   -r, --replay        turn the replay buffer on or off
   -R, --save-replay   save the last seconds of the replay buffer
   -o, --open-folder   open the recordings folder
@@ -52,13 +54,14 @@ usage: peek2 [command]
 Settings: ~/.config/peek2/config.toml";
 
 /// Commands, as the long option names without dashes.
-const COMMANDS: [(&str, char); 12] = [
+const COMMANDS: [(&str, char); 13] = [
     ("select", 's'),
     ("screenshot", 'S'),
     ("toggle", 't'),
     ("stop", 'x'),
     ("cancel", 'c'),
     ("pause", 'P'),
+    ("draw", 'd'),
     ("replay", 'r'),
     ("save-replay", 'R'),
     ("open-folder", 'o'),
@@ -143,6 +146,11 @@ impl App {
                 }
             }
             "pause" => ctl.toggle_pause(),
+            "draw" => {
+                if !frame::toggle_draw() {
+                    util::notify("draw", "Not recording", "Drawing works on a running recording; for a still use the screenshot selector.", &[], |_| {});
+                }
+            }
             "replay" => ctl.toggle_replay(),
             "save-replay" => ctl.save_replay(),
             "open-folder" => {
@@ -196,6 +204,7 @@ fn setup_hotkeys(ctl: &Controller) {
     grab(&cfg.hotkey, "record", "toggle");
     grab(&cfg.replay_hotkey, "save replay", "save-replay");
     grab(&cfg.screenshot_hotkey, "screenshot", "screenshot");
+    grab(&cfg.draw_hotkey, "draw", "draw");
 }
 
 fn fit_command(args: &[String]) -> ExitCode {

@@ -25,6 +25,13 @@ again (or Stop) to finish. The clip is saved to `~/Videos/Peek2` and copied to
 the clipboard as a file (paste it into Discord, Slack, a browser or a file
 manager). A notification offers to open it or show it in its folder.
 
+**Drawing on a recording**: press **draw** on the stop bar (or **Ctrl+Alt+D**,
+or `peek2 --draw`) and draw on the screen while it records. Pen, arrow, box
+and marker, C for colour, the wheel for size, Ctrl+Z / Ctrl+Shift+Z, Delete
+clears, Esc or a click outside puts the pen down (the marks stay until you
+clear them). The marks are a window shaped to their pixels, so they are in
+the clip and need no compositor.
+
 Pausing ends the current part and resuming starts a new one; when the take
 ends, the parts are joined without re-encoding.
 
@@ -41,7 +48,8 @@ copy / save png buttons) work in the recording selector too.
 A second toolbar under the selection has **pen** (P), **arrow** (A), **box**
 (R), **marker** (M, a highlighter) and **blur** (B, pixelates, for hiding
 secrets). C or the colour chip cycles colours, the scroll wheel changes the
-thickness, **Ctrl+Z** undoes, Esc puts the tool down. Once you've drawn
+thickness, **Ctrl+Z** undoes and **Ctrl+Shift+Z** / **Ctrl+Y** redoes, Esc
+puts the tool down. Once you've drawn
 something the selection is a screenshot: Enter saves it with the marks, and
 the record button goes away until you undo them all.
 

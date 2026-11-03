@@ -173,6 +173,7 @@ pub struct Config {
     pub replay_hotkey: String,
     pub hotkey: String,
     pub screenshot_hotkey: String,
+    pub draw_hotkey: String,
 }
 
 impl Default for Config {
@@ -204,6 +205,7 @@ impl Default for Config {
             replay_hotkey: "<Ctrl><Alt>S".into(),
             hotkey: "<Ctrl><Alt>R".into(),
             screenshot_hotkey: "<Ctrl><Alt>P".into(),
+            draw_hotkey: "<Ctrl><Alt>D".into(),
         }
     }
 }
@@ -379,6 +381,7 @@ impl Config {
             "replay_hotkey" => put!(self.replay_hotkey, s(v)),
             "hotkey" => put!(self.hotkey, s(v)),
             "screenshot_hotkey" => put!(self.screenshot_hotkey, s(v)),
+            "draw_hotkey" => put!(self.draw_hotkey, s(v)),
             "fit_size_mb" => put!(self.fit_size_mb, uint(&v)),
             "fit_strategy" => put!(self.fit_strategy, s(v).and_then(|s| FitStrategy::parse(&s))),
             // Gone with the GTK UI; accepted silently.
@@ -437,6 +440,7 @@ impl Config {
         line("Global hotkeys, e.g. \"<Ctrl><Alt>R\", \"<Super>F9\". Empty disables.", "hotkey", quote(&self.hotkey));
         line("", "replay_hotkey", quote(&self.replay_hotkey));
         line("", "screenshot_hotkey", quote(&self.screenshot_hotkey));
+        line("Draw on the running recording (also the \"draw\" button on its bar).", "draw_hotkey", quote(&self.draw_hotkey));
         o
     }
 

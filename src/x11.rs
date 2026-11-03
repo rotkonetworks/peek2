@@ -397,12 +397,16 @@ impl X {
 
     /// Cursor from the server's cursor font (X11/cursorfont.h shapes).
     pub fn set_cursor(&self, win: Window, shape: u16) {
-        let id = *self.cursors.borrow_mut().entry(shape).or_insert_with(|| {
+        let id = self.cursor_id(shape);
+        let _ = self.conn.change_window_attributes(win, &xproto::ChangeWindowAttributesAux::new().cursor(id));
+    }
+
+    pub fn cursor_id(&self, shape: u16) -> u32 {
+        *self.cursors.borrow_mut().entry(shape).or_insert_with(|| {
             let Ok(id) = self.conn.generate_id() else { return 0 };
             let _ = self.conn.create_glyph_cursor(id, self.cursor_font, self.cursor_font, shape, shape + 1, 0, 0, 0, 0xffff, 0xffff, 0xffff);
             id
-        });
-        let _ = self.conn.change_window_attributes(win, &xproto::ChangeWindowAttributesAux::new().cursor(id));
+        })
     }
 
     pub fn pointer(&self) -> Option<(i32, i32)> {
@@ -742,6 +746,8 @@ fn keysym_from_name(name: &str) -> Option<u32> {
 
 pub mod keysym {
     pub const ESCAPE: u32 = 0xff1b;
+    pub const DELETE: u32 = 0xffff;
+    pub const BACKSPACE: u32 = 0xff08;
     pub const RETURN: u32 = 0xff0d;
     pub const KP_ENTER: u32 = 0xff8d;
     pub const SPACE: u32 = 0x20;

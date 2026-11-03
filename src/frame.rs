@@ -1,9 +1,12 @@
 //! While recording a selected region: a thin red border drawn *outside* the
 //! captured area (four solid X windows painted by the server, so it shows
 //! reliably with or without a compositor) and a small control bar next to it.
+//! "draw" on the bar puts marks on the recording itself (see `ink`).
 
 use crate::controller::{Controller, Event, Phase};
+use crate::annotate::{Marks, COLORS};
 use crate::draw::{self, Item, Style, Surface};
+use crate::ink::{self, LiveInk};
 use crate::meter::Levels;
 use crate::recorder::Area;
 use crate::util;
@@ -33,6 +36,22 @@ pub struct RecordFrame {
     visible: Cell<bool>,
     closed: Cell<bool>,
     on_close: RefCell<Option<Box<dyn FnOnce()>>>,
+    ink: RefCell<Option<Rc<LiveInk>>>,
+}
+
+thread_local! {
+    static CURRENT: RefCell<std::rc::Weak<RecordFrame>> = RefCell::new(std::rc::Weak::new());
+}
+
+/// `peek2 --draw`: start or stop drawing on the running recording.
+pub fn toggle_draw() -> bool {
+    match CURRENT.with(|c| c.borrow().upgrade()) {
+        Some(f) => {
+            f.toggle_draw();
+            true
+        }
+        None => false,
+    }
 }
 
 impl RecordFrame {
@@ -68,7 +87,17 @@ impl RecordFrame {
             visible: Cell::new(false),
             closed: Cell::new(false),
             on_close: RefCell::new(Some(Box::new(on_close))),
+            ink: RefCell::new(LiveInk::new(area)),
         });
+        CURRENT.with(|c| *c.borrow_mut() = Rc::downgrade(&this));
+        if let Some(ink) = this.ink.borrow().as_ref() {
+            let weak = Rc::downgrade(&this);
+            ink.on_change(move || {
+                if let Some(t) = weak.upgrade() {
+                    t.layout();
+                }
+            });
+        }
         if bar != 0 {
             let weak = Rc::downgrade(&this);
             x.on(bar, move |ev| {
@@ -101,6 +130,28 @@ impl RecordFrame {
         if !processing {
             if let Some(m) = self.levels.borrow().item() {
                 v.push(m);
+            }
+            if let Some(ink) = self.ink.borrow().as_ref() {
+                let on = ink.is_active();
+                if on {
+                    for t in ink::TOOLS {
+                        let style = if ink.tool.get() == t { Style::Primary } else { Style::Normal };
+                        v.push(Item::Button { id: t.id(), label: t.id().into(), style });
+                    }
+                    let (name, rgb) = COLORS[ink.color.get()];
+                    v.push(Item::Swatch { id: "color", rgb, label: name.into() });
+                }
+                let m = ink.marks.borrow();
+                if m.can_undo() {
+                    v.push(Item::Button { id: "undo", label: "undo".into(), style: Style::Flat });
+                }
+                if on && m.can_redo() {
+                    v.push(Item::Button { id: "redo", label: "redo".into(), style: Style::Flat });
+                }
+                if m.can_undo() {
+                    v.push(Item::Button { id: "clear", label: "clear".into(), style: Style::Flat });
+                }
+                v.push(Item::Button { id: "draw", label: if on { "done" } else { "draw" }.into(), style: if on { Style::Primary } else { Style::Normal } });
             }
             let pause = if matches!(phase, Phase::Paused(_)) { "resume" } else { "pause" };
             v.push(Item::Button { id: "pause", label: pause.into(), style: Style::Flat });
@@ -182,10 +233,21 @@ impl RecordFrame {
             XEvent::ButtonRelease(e) if e.detail == 1 => {
                 // Don't hold `hits` borrowed: the controller calls back into redraw.
                 let h = draw::hit(&self.hits.borrow(), e.event_x as i32, e.event_y as i32);
-                match h {
-                    Some("stop") => self.ctl.stop(),
-                    Some("pause") => self.ctl.toggle_pause(),
-                    Some("discard") => self.ctl.cancel(),
+                let ink = self.ink.borrow().clone();
+                match (h, ink) {
+                    (Some("stop"), _) => self.ctl.stop(),
+                    (Some("pause"), _) => self.ctl.toggle_pause(),
+                    (Some("discard"), _) => self.ctl.cancel(),
+                    (Some("draw"), _) => self.toggle_draw(),
+                    (Some("color"), Some(i)) => i.cycle_color(),
+                    (Some("undo"), Some(i)) => i.edit(Marks::undo),
+                    (Some("redo"), Some(i)) => i.edit(Marks::redo),
+                    (Some("clear"), Some(i)) => i.edit(Marks::clear),
+                    (Some(id), Some(i)) => {
+                        if let Some(t) = ink::TOOLS.into_iter().find(|t| t.id() == id) {
+                            i.set_tool(t);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -216,6 +278,7 @@ impl RecordFrame {
                             return self.close();
                         }
                         drop(cfg);
+                        self.drop_ink();
                         for &s in &self.strips {
                             self.x.set_mapped(s, false);
                         }
@@ -242,10 +305,24 @@ impl RecordFrame {
         }
     }
 
+    fn toggle_draw(&self) {
+        let ink = self.ink.borrow().clone();
+        if let Some(i) = ink {
+            i.set_active(!i.is_active());
+        }
+    }
+
+    fn drop_ink(&self) {
+        if let Some(i) = self.ink.borrow_mut().take() {
+            i.close();
+        }
+    }
+
     pub fn close(&self) {
         if self.closed.replace(true) {
             return;
         }
+        self.drop_ink();
         for &s in &self.strips {
             self.x.destroy(s);
         }

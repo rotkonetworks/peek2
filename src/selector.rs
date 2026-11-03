@@ -392,7 +392,8 @@ impl Selector {
             "save" => return self.capture(true),
             "cancel" => return self.close(),
             "color" => self.color.set((self.color.get() + 1) % COLORS.len()),
-            "undo" => self.undo(),
+            "undo" => self.edit(crate::annotate::Marks::undo),
+            "redo" => self.edit(crate::annotate::Marks::redo),
             t if Tool::from_id(t).is_some() => self.toggle_tool(Tool::from_id(t)),
             "fmt" => self.ctl.update_config(|c| c.format = c.format.next()),
             "audio" => self.ctl.update_config(|c| c.audio = c.audio.next()),
@@ -414,9 +415,9 @@ impl Selector {
         self.set_cursor(if self.tool.get().is_some() { cursor::PENCIL } else { cursor::CROSSHAIR });
     }
 
-    fn undo(&self) {
+    fn edit(&self, f: fn(&mut crate::annotate::Marks) -> bool) {
         if let Some(c) = self.canvas.borrow_mut().as_mut() {
-            c.undo();
+            c.edit(f);
         }
     }
 
@@ -438,8 +439,10 @@ impl Selector {
         if ctrl && sym == 's' as u32 {
             return self.capture(true);
         }
-        if ctrl && sym == 'z' as u32 {
-            self.undo();
+        // Ctrl+Z undo; Ctrl+Shift+Z or Ctrl+Y redo.
+        if ctrl && (sym == 'z' as u32 || sym == 'Z' as u32 || sym == 'y' as u32) {
+            let redo = sym == 'y' as u32 || shift;
+            self.edit(if redo { crate::annotate::Marks::redo } else { crate::annotate::Marks::undo });
             return self.redraw();
         }
         if !ctrl {
@@ -554,8 +557,12 @@ impl Selector {
         if cur.is_some() {
             v.push(Item::Text(format!("size {}", self.size.get()), draw::MUTED));
         }
-        if self.annotated() {
+        let (undo, redo) = self.canvas.borrow().as_ref().map_or((false, false), |c| (c.marks.can_undo(), c.marks.can_redo()));
+        if undo {
             v.push(Item::Button { id: "undo", label: "undo".into(), style: Style::Flat });
+        }
+        if redo {
+            v.push(Item::Button { id: "redo", label: "redo".into(), style: Style::Flat });
         }
         v
     }
