@@ -12,6 +12,7 @@ use crate::controller::Controller;
 use crate::draw::{self, Item, Style, Surface};
 use crate::meter::{AudioOpts, Levels, Preview};
 use crate::recorder::Area;
+use crate::shot::Image;
 use crate::x11::{self, cursor, keysym, Rect, X};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -60,6 +61,10 @@ pub struct Selector {
     blend: bool,
     /// Screenshot mode: (bright, dimmed) pixmaps of the monitor.
     shot: Option<(u32, u32)>,
+    /// The frozen frame itself (BGRX), for still screenshots.
+    frame: Option<Vec<u8>>,
+    /// Opened for a screenshot: Enter saves a PNG instead of recording.
+    still: bool,
     surf: RefCell<Option<Surface>>,
     sel: Cell<Option<Rect>>,
     hover: Cell<Option<Rect>>,
@@ -80,7 +85,7 @@ pub struct Selector {
 
 impl Selector {
     /// `on_done` gets the chosen area and its monitor, or None if cancelled.
-    pub fn open(ctl: &Rc<Controller>, on_done: impl FnOnce(Option<(Area, Rect)>) + 'static) -> Option<Rc<Selector>> {
+    pub fn open(ctl: &Rc<Controller>, still: bool, on_done: impl FnOnce(Option<(Area, Rect)>) + 'static) -> Option<Rc<Selector>> {
         let x = x11::get();
         ctl.reload_config();
         let windows = x.client_rects();
@@ -97,7 +102,7 @@ impl Selector {
                 return None;
             }
         };
-        let shot = data.and_then(|d| screenshot(&x, win, mon, d));
+        let shot = data.as_deref().and_then(|d| screenshot(&x, win, mon, d));
         let this = Rc::new(Selector {
             x: x.clone(),
             ctl: ctl.clone(),
@@ -105,6 +110,8 @@ impl Selector {
             mon,
             blend,
             shot,
+            frame: data,
+            still,
             surf: RefCell::new(Surface::new(&x, win, depth, mon.width, mon.height)),
             sel: Cell::new(None),
             hover: Cell::new(None),
@@ -168,6 +175,9 @@ impl Selector {
 
     fn restart_preview(self: &Rc<Self>) {
         self.preview.borrow_mut().take();
+        if self.still {
+            return;
+        }
         let cfg = self.ctl.config.borrow().clone();
         self.levels.borrow_mut().configure(&cfg);
         let sources = crate::audio::resolve(&cfg);
@@ -204,7 +214,7 @@ impl Selector {
                 let (t0, x0, y0) = self.last_click.replace((time, x, y));
                 let double = time.wrapping_sub(t0) < 400 && (x - x0).abs() < 5 && (y - y0).abs() < 5;
                 if double && self.sel.get().is_some_and(|r| r.contains(x, y)) {
-                    return self.record();
+                    return self.accept();
                 }
                 let d = match self.sel.get() {
                     Some(r) => match self.handle_at(r, x, y) {
@@ -330,6 +340,8 @@ impl Selector {
     fn button(self: &Rc<Self>, id: &str) {
         match id {
             "record" => return self.record(),
+            "copy" => return self.capture(false),
+            "save" => return self.capture(true),
             "cancel" => return self.close(),
             "fmt" => self.ctl.update_config(|c| c.format = c.format.next()),
             "audio" => self.ctl.update_config(|c| c.audio = c.audio.next()),
@@ -344,17 +356,24 @@ impl Selector {
     }
 
     fn key(self: &Rc<Self>, code: u8, state: u16) {
-        if self.x.is_hotkey(code, state).is_some() {
-            return self.record();
+        // The keyboard grab hides our global hotkeys; run them from here.
+        if let Some(action) = self.x.is_hotkey(code, state) {
+            return action();
         }
         let sym = self.x.keysym(code, 0);
         let shift = state & u16::from(ModMask::SHIFT) != 0;
         let ctrl = state & u16::from(ModMask::CONTROL) != 0;
+        if ctrl && sym == 'c' as u32 {
+            return self.capture(false);
+        }
+        if ctrl && sym == 's' as u32 {
+            return self.capture(true);
+        }
         let step = if shift { 10 } else { 1 };
         let (w, h) = self.size();
         match sym {
             keysym::ESCAPE => return self.close(),
-            keysym::RETURN | keysym::KP_ENTER => return self.record(),
+            keysym::RETURN | keysym::KP_ENTER => return self.accept(),
             s if s == keysym::SPACE || s == 'f' as u32 => {
                 // Whole monitor.
                 self.sel.set(Some(Rect::new(0, 0, w, h)));
@@ -401,6 +420,14 @@ impl Selector {
 
     fn toolbar_items(&self, r: Rect) -> Vec<Item> {
         let cfg: Config = self.ctl.config.borrow().clone();
+        if self.still {
+            return vec![
+                Item::Text(format!("{:>4} x {:<4}", r.width, r.height), draw::MUTED),
+                Item::Button { id: "copy", label: "copy".into(), style: Style::Normal },
+                Item::Button { id: "save", label: "save".into(), style: Style::Primary },
+                Item::Button { id: "cancel", label: "x".into(), style: Style::Flat },
+            ];
+        }
         let mut v = vec![
             Item::Dot(false),
             Item::Text(format!("{:>4} x {:<4}", r.width, r.height), draw::MUTED),
@@ -481,7 +508,7 @@ impl Selector {
         }
 
         if sel.is_none() {
-            hint(s, w);
+            hint(s, w, self.still);
         }
 
         let mut hits = Vec::new();
@@ -511,6 +538,35 @@ impl Selector {
     }
 
     // ---- result --------------------------------------------------------
+
+    /// Enter / double-click: record, or save the screenshot.
+    fn accept(self: &Rc<Self>) {
+        if self.still {
+            self.capture(true)
+        } else {
+            self.record()
+        }
+    }
+
+    /// Screenshot of the selection: saved like a recording, or only copied.
+    pub fn capture(self: &Rc<Self>, save: bool) {
+        let Some(r) = self.sel.get() else { return };
+        if r.width < 1 || r.height < 1 {
+            return;
+        }
+        let img = self.frame.as_deref().map(|f| Image::crop(f, self.mon.width, r.x, r.y, r.width, r.height));
+        let (x, ctl) = (self.x.clone(), self.ctl.clone());
+        let area = Rect::new(self.mon.x + r.x, self.mon.y + r.y, r.width, r.height);
+        self.finish(None);
+        // Live mode has no frozen frame: grab once the overlay is gone.
+        crate::rt::idle(move || {
+            let img = img.or_else(|| x.screenshot(area).map(|data| Image { width: area.width, height: area.height, data }));
+            match img {
+                Some(img) => ctl.screenshot(img, save),
+                None => crate::util::notify_error("Screenshot: could not read the screen"),
+            }
+        });
+    }
 
     pub fn record(self: &Rc<Self>) {
         let Some(r) = self.sel.get() else { return };
@@ -552,9 +608,9 @@ thread_local! {
 }
 
 /// Open the selector unless one is open already.
-pub fn open(ctl: &Rc<Controller>, on_done: impl FnOnce(Option<(Area, Rect)>) + 'static) {
+pub fn open(ctl: &Rc<Controller>, still: bool, on_done: impl FnOnce(Option<(Area, Rect)>) + 'static) {
     if current().is_none() {
-        Selector::open(ctl, on_done);
+        Selector::open(ctl, still, on_done);
     }
 }
 
@@ -581,8 +637,9 @@ fn tag(s: &Surface, x: i32, y: i32, text: &str, ink: u32) {
     s.text(x + pw, y + ph, text, ink);
 }
 
-fn hint(s: &Surface, w: i32) {
-    let keys = [("drag", "region"), ("click", "window"), ("space", "screen"), ("enter", "record"), ("esc", "cancel")];
+fn hint(s: &Surface, w: i32, still: bool) {
+    let enter = if still { "save" } else { "record" };
+    let keys = [("drag", "region"), ("click", "window"), ("space", "screen"), ("enter", enter), ("ctrl+c", "copy"), ("esc", "cancel")];
     let f = draw::font();
     let sc = crate::x11::get().ui_scale();
     let gap = 3 * f.width;
@@ -593,7 +650,7 @@ fn hint(s: &Surface, w: i32) {
     let r = Rect::new(bx, by, bw, bh);
     s.fill(r, draw::ELEV1, 0.96);
     s.stroke(r, draw::LINE);
-    s.circle(bx + 18 * sc, by + bh / 2, 4 * sc, draw::RED, true);
+    s.circle(bx + 18 * sc, by + bh / 2, 4 * sc, if still { draw::GOLD } else { draw::RED }, true);
     let ty = by + (bh - f.height()) / 2;
     let mut x = bx + 14 * sc + lead;
     for (k, v) in keys {
@@ -606,11 +663,11 @@ fn hint(s: &Surface, w: i32) {
 
 /// Grab the monitor once (compositor-less setups) into two server-side
 /// pixmaps: as is, and dimmed like the scrim.
-fn screenshot(x: &Rc<X>, win: u32, mon: Rect, data: Vec<u8>) -> Option<(u32, u32)> {
+fn screenshot(x: &Rc<X>, win: u32, mon: Rect, data: &[u8]) -> Option<(u32, u32)> {
     let a = SCRIM_ALPHA;
     let keep = 1.0 - a;
     let sc = [(SCRIM & 0xff) as f64 * a, ((SCRIM >> 8) & 0xff) as f64 * a, ((SCRIM >> 16) & 0xff) as f64 * a];
-    let mut dim = data.clone();
+    let mut dim = data.to_vec();
     for px in dim.as_chunks_mut::<4>().0 {
         for k in 0..3 {
             px[k] = (px[k] as f64 * keep + sc[k]).round() as u8;
@@ -626,7 +683,7 @@ fn screenshot(x: &Rc<X>, win: u32, mon: Rect, data: Vec<u8>) -> Option<(u32, u32
         let _ = x.conn.free_gc(gc);
         Some(p)
     };
-    let shot = (make(&data)?, make(&dim)?);
+    let shot = (make(data)?, make(&dim)?);
     let _ = x.conn.flush();
     Some(shot)
 }

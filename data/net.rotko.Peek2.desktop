@@ -7,9 +7,13 @@ Exec=peek2
 Icon=media-record
 Terminal=false
 Categories=AudioVideo;Video;Recorder;
-Keywords=screencast;recorder;gif;webm;mp4;clip;
+Keywords=screencast;recorder;gif;webm;mp4;clip;screenshot;
 StartupNotify=false
-Actions=Replay;Stop;
+Actions=Screenshot;Replay;Stop;
+
+[Desktop Action Screenshot]
+Name=Screenshot
+Exec=peek2 --screenshot
 
 [Desktop Action Replay]
 Name=Replay buffer on/off

@@ -7,6 +7,7 @@ use crate::postprocess::{self, Job};
 use crate::recorder::{Area, Recording};
 use crate::replay::Replay;
 use crate::rt::{self, TimerId};
+use crate::shot::Image;
 use crate::util;
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -391,7 +392,7 @@ impl Controller {
                     Err(e) => return this.fail(format!("{e:#}")),
                 };
                 let t2 = this.clone();
-                this.deliver(file, &cfg, cfg.format.ext(), "", move |dest| {
+                this.deliver(file, &cfg, cfg.save_dir(), cfg.format.ext(), "", move |dest| {
                     t2.set_phase(Phase::Idle);
                     if let Some(dest) = dest {
                         t2.saved_status(&dest);
@@ -416,10 +417,10 @@ impl Controller {
 
     /// Save a finished file: pick the destination, move it there, copy it
     /// to the clipboard and notify.
-    fn deliver(self: &Rc<Self>, file: PathBuf, cfg: &Config, ext: &str, suffix: &str, done: impl FnOnce(Option<PathBuf>) + 'static) {
+    fn deliver(self: &Rc<Self>, file: PathBuf, cfg: &Config, dir: PathBuf, ext: &str, suffix: &str, done: impl FnOnce(Option<PathBuf>) + 'static) {
         let this = self.clone();
         let cfg2 = cfg.clone();
-        self.destination(cfg, ext, suffix, move |dest| {
+        self.destination(cfg, dir, ext, suffix, move |dest| {
             let Some(dest) = dest else {
                 let _ = std::fs::remove_file(&file);
                 return done(None);
@@ -439,8 +440,7 @@ impl Controller {
         });
     }
 
-    fn destination(&self, cfg: &Config, ext: &str, suffix: &str, done: impl FnOnce(Option<PathBuf>) + 'static) {
-        let dir = cfg.save_dir();
+    fn destination(&self, cfg: &Config, dir: PathBuf, ext: &str, suffix: &str, done: impl FnOnce(Option<PathBuf>) + 'static) {
         let _ = std::fs::create_dir_all(&dir);
         let name = util::strftime(&cfg.filename_format).unwrap_or_else(|| "Peek".into());
         let name = format!("{}{suffix}.{ext}", name.replace('/', "-"));
@@ -455,6 +455,42 @@ impl Controller {
                 None => Some(default),
             },
             done,
+        );
+    }
+
+    /// Encode a screenshot to PNG, then save it (to the clipboard too, per
+    /// the settings) or only put it on the clipboard.
+    pub fn screenshot(self: &Rc<Self>, img: Image, save: bool) {
+        self.reload_config();
+        let cfg = self.config.borrow().clone();
+        let (w, h) = (img.width, img.height);
+        let this = self.clone();
+        rt::background(
+            move || img.into_png(),
+            move |res| {
+                let file = match res {
+                    Ok(f) => f,
+                    Err(e) => return this.emit(Event::Error(format!("Screenshot: {e:#}"))),
+                };
+                if save {
+                    let t2 = this.clone();
+                    let dir = cfg.screenshot_dir();
+                    return this.deliver(file, &cfg, dir, "png", "", move |dest| {
+                        if let (Some(dest), false) = (dest, t2.is_busy()) {
+                            t2.saved_status(&dest);
+                        }
+                    });
+                }
+                let data = std::fs::read(&file);
+                let _ = std::fs::remove_file(&file);
+                match data {
+                    Ok(png) => crate::x11::get().set_clipboard(vec![("image/png", png)]),
+                    Err(e) => return this.emit(Event::Error(format!("Screenshot: {e}"))),
+                }
+                if cfg.notify {
+                    util::notify("shot", "Screenshot copied", &format!("{w} x {h}, on the clipboard"), &[], |_| {});
+                }
+            },
         );
     }
 
@@ -518,7 +554,7 @@ impl Controller {
                     Err(e) => return this.emit(Event::Error(format!("{e:#}"))),
                 };
                 let t2 = this.clone();
-                this.deliver(file, &cfg, "mp4", " replay", move |dest| {
+                this.deliver(file, &cfg, cfg.save_dir(), "mp4", " replay", move |dest| {
                     if let (Some(dest), false) = (dest, t2.is_busy()) {
                         t2.saved_status(&dest);
                     }
@@ -574,7 +610,8 @@ fn notify_saved(path: &Path, copied: bool) {
     let size = util::format_size(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0));
     let body = if copied { format!("{name} ({size}), copied to clipboard") } else { format!("{name} ({size})") };
     let p = path.to_path_buf();
-    util::notify("saved", "Recording saved", &body, &[("default", "Open"), ("open", "Open"), ("folder", "Show in folder")], move |a| {
+    let title = if path.extension().is_some_and(|e| e == "png") { "Screenshot saved" } else { "Recording saved" };
+    util::notify("saved", title, &body, &[("default", "Open"), ("open", "Open"), ("folder", "Show in folder")], move |a| {
         match a.as_str() {
             "folder" => util::show_in_folder(&p),
             _ => util::open(&p),
@@ -594,6 +631,7 @@ pub fn copy_file_to_clipboard(path: &Path) {
     ];
     // Raw media for apps that accept pasted image/video data directly.
     let mime = match path.extension().and_then(|e| e.to_str()) {
+        Some("png") => Some("image/png"),
         Some("gif") => Some("image/gif"),
         Some("apng") => Some("image/apng"),
         Some("webm") => Some("video/webm"),

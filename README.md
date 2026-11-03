@@ -14,6 +14,7 @@ Launch `peek2` (or press **Ctrl+Alt+R**). The monitor under the pointer darkens:
 - **drag** to select a region, or **click** a window to record exactly it
 - drag the handles to adjust; arrows nudge (Shift ×10, Ctrl resizes)
 - **Space**: whole screen · **Enter** / double-click: record · **Esc**: cancel
+- **Ctrl+C**: copy the selection to the clipboard as a PNG · **Ctrl+S**: save it
 - the toolbar under the selection cycles format, audio source, mouse capture
   and the size limit (right-click the size limit to change what gives way)
 
@@ -26,6 +27,14 @@ manager). A notification offers to open it or show it in its folder.
 
 Pausing ends the current part and resuming starts a new one; when the take
 ends, the parts are joined without re-encoding.
+
+## Screenshots
+
+**Ctrl+Alt+P** (or `peek2 --screenshot`, or the tray menu) opens the same
+selector for a still: **Enter** saves a PNG to `~/Pictures/Peek2` and copies
+it, **Ctrl+C** only copies it. The picture is the frame frozen when the
+selector opened, so menus and tooltips stay in it. Ctrl+C and Ctrl+S work in
+the recording selector too.
 
 ## Fit to size
 
@@ -65,6 +74,7 @@ On X11, clipboard contents also disappear when the app that owns them exits.
 | Command | |
 |---|---|
 | `peek2` / `--select` | region selector |
+| `--screenshot` | selector for a PNG screenshot |
 | `--toggle` | start/stop (for binding in sxhkd etc.) |
 | `--background` | start resident with the tray icon and hotkey (autostart, e.g. in bspwmrc) |
 | `--pause` | pause / resume |

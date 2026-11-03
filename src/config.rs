@@ -160,6 +160,7 @@ pub struct Config {
     pub gif_quality: u8,
     pub start_delay: u32,
     pub save_folder: String,
+    pub screenshot_folder: String,
     pub filename_format: String,
     pub ask_save_location: bool,
     pub copy_to_clipboard: bool,
@@ -171,6 +172,7 @@ pub struct Config {
     pub replay_on_start: bool,
     pub replay_hotkey: String,
     pub hotkey: String,
+    pub screenshot_hotkey: String,
 }
 
 impl Default for Config {
@@ -189,6 +191,7 @@ impl Default for Config {
             gif_quality: 90,
             start_delay: 0,
             save_folder: String::new(),
+            screenshot_folder: String::new(),
             filename_format: "Peek %Y-%m-%d %H-%M-%S".into(),
             ask_save_location: false,
             copy_to_clipboard: true,
@@ -200,6 +203,7 @@ impl Default for Config {
             replay_on_start: false,
             replay_hotkey: "<Ctrl><Alt>S".into(),
             hotkey: "<Ctrl><Alt>R".into(),
+            screenshot_hotkey: "<Ctrl><Alt>P".into(),
         }
     }
 }
@@ -362,6 +366,7 @@ impl Config {
             "gif_quality" => put!(self.gif_quality, uint(&v).filter(|q| *q <= 100).map(|q| q as u8)),
             "start_delay" => put!(self.start_delay, uint(&v)),
             "save_folder" => put!(self.save_folder, s(v)),
+            "screenshot_folder" => put!(self.screenshot_folder, s(v)),
             "filename_format" => put!(self.filename_format, s(v)),
             "ask_save_location" => put!(self.ask_save_location, b(&v)),
             "copy_to_clipboard" => put!(self.copy_to_clipboard, b(&v)),
@@ -373,6 +378,7 @@ impl Config {
             "replay_on_start" => put!(self.replay_on_start, b(&v)),
             "replay_hotkey" => put!(self.replay_hotkey, s(v)),
             "hotkey" => put!(self.hotkey, s(v)),
+            "screenshot_hotkey" => put!(self.screenshot_hotkey, s(v)),
             "fit_size_mb" => put!(self.fit_size_mb, uint(&v)),
             "fit_strategy" => put!(self.fit_strategy, s(v).and_then(|s| FitStrategy::parse(&s))),
             // Gone with the GTK UI; accepted silently.
@@ -418,6 +424,7 @@ impl Config {
         line("GIF quality, 1-100 (palette size and dithering).", "gif_quality", self.gif_quality.to_string());
         line("Seconds of countdown before recording.", "start_delay", self.start_delay.to_string());
         line("Empty: ~/Videos/Peek2", "save_folder", quote(&self.save_folder));
+        line("Empty: ~/Pictures/Peek2", "screenshot_folder", quote(&self.screenshot_folder));
         line("strftime pattern, as date(1) understands it.", "filename_format", quote(&self.filename_format));
         line("Ask for a file name (needs zenity or kdialog).", "ask_save_location", self.ask_save_location.to_string());
         line("", "copy_to_clipboard", self.copy_to_clipboard.to_string());
@@ -429,6 +436,7 @@ impl Config {
         line("With desktop + mic, also store each as its own audio track.", "separate_audio_tracks", self.separate_audio_tracks.to_string());
         line("Global hotkeys, e.g. \"<Ctrl><Alt>R\", \"<Super>F9\". Empty disables.", "hotkey", quote(&self.hotkey));
         line("", "replay_hotkey", quote(&self.replay_hotkey));
+        line("", "screenshot_hotkey", quote(&self.screenshot_hotkey));
         o
     }
 
@@ -448,6 +456,13 @@ impl Config {
             return PathBuf::from(&self.save_folder);
         }
         crate::util::videos_dir().join("Peek2")
+    }
+
+    pub fn screenshot_dir(&self) -> PathBuf {
+        if !self.screenshot_folder.is_empty() {
+            return PathBuf::from(&self.screenshot_folder);
+        }
+        crate::util::pictures_dir().join("Peek2")
     }
 }
 

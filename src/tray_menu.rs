@@ -66,7 +66,10 @@ fn rows(ctl: &Controller) -> Vec<Row> {
     let item = |id: &str, label: &str, hint: &str| Row::Item { id: id.into(), label: label.into(), hint: hint.into() };
     let mut v = vec![Row::Heading("RECORD".into())];
     match ctl.phase() {
-        Phase::Idle => v.push(item("select", "Select area…", "")),
+        Phase::Idle => {
+            v.push(item("select", "Select area…", ""));
+            v.push(item("screenshot", "Screenshot…", ""));
+        }
         Phase::Recording(_) | Phase::Countdown(_) => {
             v.push(item("stop", "Stop and save", ""));
             v.push(item("pause", "Pause", ""));

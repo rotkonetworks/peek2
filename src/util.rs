@@ -33,10 +33,19 @@ pub fn runtime_dir() -> PathBuf {
 
 /// `XDG_VIDEOS_DIR` from user-dirs.dirs, else ~/Videos.
 pub fn videos_dir() -> PathBuf {
+    user_dir("XDG_VIDEOS_DIR", "Videos")
+}
+
+/// `XDG_PICTURES_DIR` from user-dirs.dirs, else ~/Pictures.
+pub fn pictures_dir() -> PathBuf {
+    user_dir("XDG_PICTURES_DIR", "Pictures")
+}
+
+fn user_dir(key: &str, fallback: &str) -> PathBuf {
     let file = config_dir().join("user-dirs.dirs");
     if let Ok(s) = std::fs::read_to_string(file) {
         for line in s.lines() {
-            if let Some(v) = line.trim().strip_prefix("XDG_VIDEOS_DIR=") {
+            if let Some(v) = line.trim().strip_prefix(key).and_then(|v| v.strip_prefix('=')) {
                 let v = v.trim().trim_matches('"');
                 let v = v.replace("$HOME", &home().to_string_lossy());
                 if v.starts_with('/') && Path::new(&v) != home() {
@@ -45,7 +54,7 @@ pub fn videos_dir() -> PathBuf {
             }
         }
     }
-    home().join("Videos")
+    home().join(fallback)
 }
 
 /// Decimal units, like GLib's format_size: "834 kB", "12.3 MB".

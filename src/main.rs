@@ -13,6 +13,7 @@ mod recorder;
 mod replay;
 mod rt;
 mod selector;
+mod shot;
 mod status;
 mod tray;
 mod tray_menu;
@@ -30,6 +31,8 @@ peek2: record a screen region with audio, straight to the clipboard
 usage: peek2 [command]
 
   -s, --select        select a region or window and record (default)
+  -S, --screenshot    select a region or window and save a PNG
+                      (in either selector, Ctrl+C copies it instead)
   -t, --toggle        start/stop recording (bind this to a key)
   -x, --stop          stop and save
   -c, --cancel        discard the recording
@@ -48,8 +51,9 @@ usage: peek2 [command]
 Settings: ~/.config/peek2/config.toml";
 
 /// Commands, as the long option names without dashes.
-const COMMANDS: [(&str, char); 11] = [
+const COMMANDS: [(&str, char); 12] = [
     ("select", 's'),
+    ("screenshot", 'S'),
     ("toggle", 't'),
     ("stop", 'x'),
     ("cancel", 'c'),
@@ -87,11 +91,11 @@ fn app() -> Rc<App> {
 }
 
 impl App {
-    fn open_selector(&self) {
+    fn open_selector(&self, still: bool) {
         if self.ctl.is_busy() {
             return;
         }
-        selector::open(&self.ctl, |res| {
+        selector::open(&self.ctl, still, |res| {
             let Some((area, mon)) = res else { return };
             let app = app();
             let f = frame::RecordFrame::start(&app.ctl, area, mon, || {
@@ -111,14 +115,24 @@ impl App {
         }
         match selector::current() {
             Some(s) => s.record(),
-            None => self.open_selector(),
+            None => self.open_selector(false),
+        }
+    }
+
+    /// Screenshot hotkey / `--screenshot`: save the current selection, or
+    /// open the selector for a still.
+    fn screenshot(&self) {
+        match selector::current() {
+            Some(s) => s.capture(true),
+            None => self.open_selector(true),
         }
     }
 
     fn run(&self, cmd: &str) {
         let ctl = &self.ctl;
         match cmd {
-            "select" => self.open_selector(),
+            "select" => self.open_selector(false),
+            "screenshot" => self.screenshot(),
             "toggle" => self.toggle(),
             "stop" => ctl.stop(),
             "cancel" => {
@@ -180,6 +194,7 @@ fn setup_hotkeys(ctl: &Controller) {
     };
     grab(&cfg.hotkey, "record", "toggle");
     grab(&cfg.replay_hotkey, "save replay", "save-replay");
+    grab(&cfg.screenshot_hotkey, "screenshot", "screenshot");
 }
 
 fn fit_command(args: &[String]) -> ExitCode {
