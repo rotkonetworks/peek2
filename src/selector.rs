@@ -461,6 +461,12 @@ impl Selector {
             keysym::ESCAPE if self.tool.get().is_some() => self.toggle_tool(self.tool.get()),
             keysym::ESCAPE => return self.close(),
             keysym::RETURN | keysym::KP_ENTER => return self.accept(),
+            // With a region chosen, Space records and then presses Space in
+            // the app below: one key starts the recording and the video.
+            keysym::SPACE if !self.still && self.sel.get().is_some() && !self.annotated() => {
+                self.ctl.press_space_when_recording();
+                return self.record();
+            }
             s if s == keysym::SPACE || s == 'f' as u32 => {
                 // Whole monitor.
                 self.sel.set(Some(Rect::new(0, 0, w, h)));

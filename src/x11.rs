@@ -587,6 +587,16 @@ impl X {
         syms.get(base + col).copied().unwrap_or(0)
     }
 
+    /// Press and release a key as if typed (XTEST), for the focused app.
+    pub fn press_key(&self, keysym: u32) {
+        use x11rb::protocol::xtest::ConnectionExt as _;
+        let Some(&code) = self.keycodes(keysym).first() else { return };
+        for ty in [xproto::KEY_PRESS_EVENT, xproto::KEY_RELEASE_EVENT] {
+            let _ = self.conn.xtest_fake_input(ty, code, x11rb::CURRENT_TIME, self.root, 0, 0, 0);
+        }
+        let _ = self.conn.flush();
+    }
+
     fn keycodes(&self, keysym: u32) -> Vec<u8> {
         let km = self.keymap.borrow();
         let (min, per, syms) = (km.0, km.1, &km.2);

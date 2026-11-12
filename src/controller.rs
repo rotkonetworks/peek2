@@ -53,6 +53,8 @@ pub struct Controller {
     /// Settings of the running take, fixed at its start: changing the
     /// format or audio mid-take (tray menu) must not mix containers.
     take: RefCell<Config>,
+    /// Press Space in the focused app once recording runs (selector Space).
+    space_on_start: Cell<bool>,
 }
 
 impl Controller {
@@ -74,6 +76,7 @@ impl Controller {
             area: Cell::new(None),
             replay: RefCell::new(None),
             take: RefCell::new(Config::default()),
+            space_on_start: Cell::new(false),
         })
     }
 
@@ -236,6 +239,10 @@ impl Controller {
         *self.rec.borrow_mut() = Some(rec.clone());
         let offset = self.offset.get();
         self.set_phase(Phase::Recording(offset));
+        if self.space_on_start.replace(false) {
+            // ffmpeg has its first frames by now; the app has focus back.
+            rt::once_ms(120, || crate::x11::get().press_key(crate::x11::keysym::SPACE));
+        }
         let this = Rc::downgrade(self);
         let id = rt::timeout(Duration::from_millis(250), move || {
             let Some(this) = this.upgrade() else { return false };
@@ -246,6 +253,10 @@ impl Controller {
             true
         });
         self.timer.set(Some(id));
+    }
+
+    pub fn press_space_when_recording(&self) {
+        self.space_on_start.set(true);
     }
 
     fn part_finished(self: &Rc<Self>, res: anyhow::Result<()>) {
@@ -358,6 +369,7 @@ impl Controller {
 
     pub fn cancel(&self) {
         self.cancelled.set(true);
+        self.space_on_start.set(false);
         self.stop_timer();
         match self.phase.get() {
             Phase::Countdown(_) => self.set_phase(Phase::Idle),

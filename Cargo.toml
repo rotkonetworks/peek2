@@ -1,6 +1,6 @@
 [package]
 name = "peek2"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "MIT"
 description = "Peek rewritten in Rust: region screen recorder with audio"
@@ -11,7 +11,7 @@ readme = "README.md"
 # else is std plus tools already on the box (ffmpeg, pactl, notify-send).
 [dependencies]
 anyhow = "1.0.104"
-x11rb = { version = "0.13", features = ["randr", "shape"] }
+x11rb = { version = "0.13", features = ["randr", "shape", "xtest"] }
 
 [profile.release]
 lto = "thin"

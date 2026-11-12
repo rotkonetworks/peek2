@@ -14,6 +14,8 @@ Launch `peek2` (or press **Ctrl+Alt+R**). The monitor under the pointer darkens:
 - **drag** to select a region, or **click** a window to record exactly it
 - drag the handles to adjust; arrows nudge (Shift ×10, Ctrl resizes)
 - **Space**: whole screen · **Enter** / double-click: record · **Esc**: cancel
+- with a region chosen, **Space** records *and* presses Space in the app under
+  it, so one key starts both the recording and the (paused) video
 - **Ctrl+C**: copy the selection to the clipboard as a PNG · **Ctrl+S**: save it
 - the toolbar under the selection cycles format, audio source, mouse capture
   and the size limit (right-click the size limit to change what gives way)
